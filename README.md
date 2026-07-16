@@ -81,10 +81,12 @@ python3 -m unittest discover -s tests/unit -v
 python3 -m unittest discover -s tests/integration -v
 ruff format --check src/ship_flow tests scripts/install_codex_skill.py scripts/install-codex-skill.py
 ruff check src/ship_flow tests scripts/install_codex_skill.py scripts/install-codex-skill.py
+ship --help
 git diff --check
 ```
 
-GitHub Actions runs the supported test matrix on Python 3.11 and 3.12.
+GitHub Actions runs lint once on Python 3.12, then the supported test matrix on
+Python 3.11 and 3.12.
 
 ## Contributing, security, and license
 
