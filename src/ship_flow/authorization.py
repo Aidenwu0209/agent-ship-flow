@@ -10,9 +10,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterator, Mapping
 
-from .model import Phase
+from .model import LEGAL_TRANSITIONS, Phase
 from .store import (
     FileLock,
+    InvalidTransitionError,
     StateCorruptionError,
     StateNotFoundError,
     StateStore,
@@ -686,6 +687,33 @@ class AuthorizationStore:
                     "immutable scope-change request archive conflicts"
                 ) from None
 
+    def _request_archives_locked(
+        self,
+        *,
+        run_id: str,
+    ) -> tuple[ScopeChangeRequest, ...]:
+        try:
+            names = _private_directory_names(
+                self.requests_directory,
+                trusted_root=self.store.trusted_root,
+            )
+        except StateNotFoundError:
+            return ()
+        requests: list[ScopeChangeRequest] = []
+        for name in names:
+            match = re.fullmatch(r"([0-9a-f]{64})\.json", name)
+            if match is None:
+                raise StateCorruptionError(
+                    "scope-change requests directory has unknown files"
+                )
+            request = self._load_request_archive_locked(match.group(1))
+            if request.run_id != run_id:
+                raise StateCorruptionError(
+                    "scope-change request archive belongs to another run"
+                )
+            requests.append(request)
+        return tuple(requests)
+
     def pending(self) -> ScopeChangeRequest | None:
         with self._locked():
             return self._pending_locked()
@@ -814,6 +842,44 @@ class AuthorizationStore:
             and request.gate_revision == expected_revision
         )
 
+    def _prepared_request_locked(
+        self,
+        *,
+        run_id: str,
+        contract: AuthorizationContract,
+        reason: str,
+        summary: str,
+        proposed_goal: str,
+        proposed_manifest_sha256: str,
+        proposed_release_target: str | None,
+        proposed_previous_release: str | None,
+        expected_revision: int,
+    ) -> ScopeChangeRequest | None:
+        same_context = [
+            request
+            for request in self._request_archives_locked(run_id=run_id)
+            if request.contract_digest == contract.digest()
+            and request.contract_generation == contract.generation
+            and request.gate_revision == expected_revision
+        ]
+        if not same_context:
+            return None
+        if len(same_context) != 1 or not self._request_matches(
+            same_context[0],
+            contract=contract,
+            reason=reason,
+            summary=summary,
+            proposed_goal=proposed_goal,
+            proposed_manifest_sha256=proposed_manifest_sha256,
+            proposed_release_target=proposed_release_target,
+            proposed_previous_release=proposed_previous_release,
+            expected_revision=expected_revision,
+        ):
+            raise StateCorruptionError(
+                "prepared scope-change request publication conflicts"
+            )
+        return same_context[0]
+
     def request_change(
         self,
         *,
@@ -881,36 +947,53 @@ class AuthorizationStore:
                 raise StaleRevisionError(
                     f"expected revision {expected_revision}, found {state.revision}"
                 )
-            requested_at = _utc_now()
-            identity: dict[str, object] = {
-                "schema_version": 1,
-                "run_id": state.run_id,
-                "contract_digest": contract.digest(),
-                "contract_generation": contract.generation,
-                "reason": reason,
-                "summary": summary,
-                "proposed_goal": proposed_goal,
-                "proposed_manifest_sha256": proposed_manifest_sha256,
-                "proposed_release_target": proposed_release_target,
-                "proposed_previous_release": proposed_previous_release,
-                "requested_at": requested_at,
-                "gate_revision": expected_revision,
-            }
-            request = ScopeChangeRequest(
-                request_id=_digest(identity),
+            if Phase.AWAITING_SCOPE_APPROVAL not in LEGAL_TRANSITIONS[state.phase]:
+                raise InvalidTransitionError(
+                    f"cannot transition from {state.phase.value} "
+                    f"to {Phase.AWAITING_SCOPE_APPROVAL.value}"
+                )
+            request = self._prepared_request_locked(
                 run_id=state.run_id,
-                contract_digest=contract.digest(),
-                contract_generation=contract.generation,
+                contract=contract,
                 reason=reason,
                 summary=summary,
                 proposed_goal=proposed_goal,
                 proposed_manifest_sha256=proposed_manifest_sha256,
                 proposed_release_target=proposed_release_target,
                 proposed_previous_release=proposed_previous_release,
-                requested_at=requested_at,
-                gate_revision=expected_revision,
+                expected_revision=expected_revision,
             )
-            self._write_request_archive(request)
+            if request is None:
+                requested_at = _utc_now()
+                identity: dict[str, object] = {
+                    "schema_version": 1,
+                    "run_id": state.run_id,
+                    "contract_digest": contract.digest(),
+                    "contract_generation": contract.generation,
+                    "reason": reason,
+                    "summary": summary,
+                    "proposed_goal": proposed_goal,
+                    "proposed_manifest_sha256": proposed_manifest_sha256,
+                    "proposed_release_target": proposed_release_target,
+                    "proposed_previous_release": proposed_previous_release,
+                    "requested_at": requested_at,
+                    "gate_revision": expected_revision,
+                }
+                request = ScopeChangeRequest(
+                    request_id=_digest(identity),
+                    run_id=state.run_id,
+                    contract_digest=contract.digest(),
+                    contract_generation=contract.generation,
+                    reason=reason,
+                    summary=summary,
+                    proposed_goal=proposed_goal,
+                    proposed_manifest_sha256=proposed_manifest_sha256,
+                    proposed_release_target=proposed_release_target,
+                    proposed_previous_release=proposed_previous_release,
+                    requested_at=requested_at,
+                    gate_revision=expected_revision,
+                )
+                self._write_request_archive(request)
             _atomic_write_private_json(
                 self.pending_path,
                 request.to_dict(),

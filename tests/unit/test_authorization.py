@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import stat
@@ -9,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from ship_flow import authorization as authorization_module
 from ship_flow.authorization import (
     AuthorizationContract,
     AuthorizationStore,
@@ -17,7 +19,12 @@ from ship_flow.authorization import (
     ScopeChangeResolution,
 )
 from ship_flow.model import Phase
-from ship_flow.store import StateCorruptionError, StateStore, StaleRevisionError
+from ship_flow.store import (
+    InvalidTransitionError,
+    StateCorruptionError,
+    StateStore,
+    StaleRevisionError,
+)
 
 
 class AuthorizationStoreTests(unittest.TestCase):
@@ -84,6 +91,30 @@ class AuthorizationStoreTests(unittest.TestCase):
             / "requests"
             / f"{request.request_id}.json"
         )
+
+    def _request_archive_files(self) -> list[Path]:
+        return sorted(
+            (self.run_directory / "authorization" / "requests").glob("*.json")
+        )
+
+    @staticmethod
+    def _request_with_identity(
+        request: ScopeChangeRequest,
+        **changes: object,
+    ) -> ScopeChangeRequest:
+        changed = replace(request, **changes)
+        identity = changed.to_dict()
+        identity.pop("request_id")
+        request_id = hashlib.sha256(
+            json.dumps(
+                identity,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return replace(changed, request_id=request_id)
 
     def test_missing_contract_uses_strict_compatibility_mode(self) -> None:
         self.assertIsNone(self.authorizations.current())
@@ -354,6 +385,100 @@ class AuthorizationStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(self.authorizations.pending(), request)
+
+    def test_request_recovers_archive_written_before_pending_pointer(self) -> None:
+        self._create_initial()
+        real_write = authorization_module._atomic_write_private_json
+
+        def fail_pending_write(
+            path: Path,
+            payload: object,
+            **kwargs: object,
+        ) -> None:
+            if path == self.authorizations.pending_path:
+                raise OSError("simulated crash before pending pointer")
+            real_write(path, payload, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(
+            authorization_module,
+            "_atomic_write_private_json",
+            side_effect=fail_pending_write,
+        ):
+            with self.assertRaisesRegex(OSError, "simulated crash"):
+                self._request_change()
+
+        prepared_files = self._request_archive_files()
+        self.assertEqual(len(prepared_files), 1)
+        prepared = ScopeChangeRequest.from_dict(
+            json.loads(prepared_files[0].read_text(encoding="utf-8"))
+        )
+        self.assertFalse(self.authorizations.pending_path.exists())
+        self.assertEqual(self.store.load(), self.state)
+
+        recovered = self._request_change()
+
+        self.assertEqual(recovered, prepared)
+        self.assertEqual(self._request_archive_files(), prepared_files)
+        self.assertEqual(self.authorizations.pending(), prepared)
+
+    def test_request_rejects_conflicting_prepared_archives(self) -> None:
+        self._create_initial()
+        real_write = authorization_module._atomic_write_private_json
+
+        def fail_pending_write(
+            path: Path,
+            payload: object,
+            **kwargs: object,
+        ) -> None:
+            if path == self.authorizations.pending_path:
+                raise OSError("simulated crash before pending pointer")
+            real_write(path, payload, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(
+            authorization_module,
+            "_atomic_write_private_json",
+            side_effect=fail_pending_write,
+        ):
+            with self.assertRaises(OSError):
+                self._request_change()
+        prepared = ScopeChangeRequest.from_dict(
+            json.loads(self._request_archive_files()[0].read_text(encoding="utf-8"))
+        )
+        conflicting = self._request_with_identity(
+            prepared,
+            summary="a conflicting proposal for the same gate",
+        )
+        conflict_path = self._request_archive_path(conflicting)
+        conflict_path.write_text(
+            json.dumps(
+                conflicting.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        conflict_path.chmod(0o600)
+
+        with self.assertRaises(StateCorruptionError):
+            self._request_change()
+
+        self.assertFalse(self.authorizations.pending_path.exists())
+        self.assertEqual(self.store.load(), self.state)
+
+    def test_blocked_request_writes_no_request_artifacts(self) -> None:
+        self._create_initial()
+        blocked = self.store.transition(
+            Phase.BLOCKED,
+            expected_revision=self.state.revision,
+        )
+
+        with self.assertRaises(InvalidTransitionError):
+            self._request_change()
+
+        self.assertEqual(self._request_archive_files(), [])
+        self.assertFalse(self.authorizations.pending_path.exists())
+        self.assertEqual(self.store.load(), blocked)
 
     def test_request_rejects_invalid_digest_and_empty_reason(self) -> None:
         self._create_initial()
