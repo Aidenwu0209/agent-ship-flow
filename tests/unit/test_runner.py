@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -131,7 +132,6 @@ class CommandRunnerValidationTests(unittest.TestCase):
         wrappers = (
             ("sh", "-c", "printf blocked"),
             ("/bin/bash", "-lc", "printf blocked"),
-            ("zsh", "-c", "printf blocked"),
             ("/usr/bin/env", "sh", "-c", "printf blocked"),
             ("/usr/bin/env", "-u", "IGNORED", "sh", "-c", "printf blocked"),
             (
@@ -185,6 +185,8 @@ class CommandRunnerValidationTests(unittest.TestCase):
             ("/bin/bash", "-O", "extglob", "-c", "printf blocked"),
             (str(shell_alias), "-c", "printf blocked"),
         )
+        if shutil.which("zsh") is not None:
+            wrappers += (("zsh", "-c", "printf blocked"),)
         for argv in wrappers:
             with (
                 self.subTest(argv=argv),

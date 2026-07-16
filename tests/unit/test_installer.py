@@ -730,6 +730,9 @@ class InstallationTests(unittest.TestCase):
         )
         journal = self.fixture.codex_home / ".ship-flow-install-journal.json"
         original_digest = installer_module.canonical_tree_digest
+        foreign_backup = self.fixture.root / "foreign-skill-backup"
+        foreign_backup.mkdir()
+        (foreign_backup / "foreign.txt").write_text("keep", encoding="utf-8")
         swapped = False
 
         def replace_after_digest(path: Path) -> str:
@@ -737,8 +740,7 @@ class InstallationTests(unittest.TestCase):
             digest = original_digest(path)
             if Path(path) == skill_backup and not swapped:
                 shutil.rmtree(skill_backup)
-                skill_backup.mkdir()
-                (skill_backup / "foreign.txt").write_text("keep", encoding="utf-8")
+                foreign_backup.rename(skill_backup)
                 swapped = True
             return digest
 
