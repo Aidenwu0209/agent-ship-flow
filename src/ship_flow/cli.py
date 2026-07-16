@@ -268,6 +268,29 @@ def _policy_aware_state_action(
     )
 
 
+def _policy_aware_pending_release_action(
+    repository: GitRepository,
+    run_id: str,
+    store: StateStore,
+    state: RunState,
+) -> dict[str, object]:
+    authorizations = AuthorizationStore(store)
+    contract = _current_authorization(store)
+    if contract is not None and contract.mode is ExecutionMode.AUTONOMOUS:
+        run = Reconciler(repository).reconcile(run_id)
+        return _policy_aware_next_action(
+            run,
+            authorizations=authorizations,
+            contract=contract,
+            recover_approval=True,
+        )
+    return _policy_aware_next_action(
+        state,
+        authorizations=authorizations,
+        contract=contract,
+    )
+
+
 def _policy_aware_next_action(
     run: RunState | ReconciledRun,
     *,
@@ -948,25 +971,49 @@ def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
         allow_default_expiry_recovery=args.expires_at is None,
     )
     state = store.load()
+    approval = {
+        "gate": record.gate,
+        "approval_id": record.approval_id,
+        "target": record.target,
+    }
+    if record.gate == "rollback":
+        approval.update(
+            {
+                "failed_release_id": record.failed_release_id,
+                "previous_release": record.previous_release,
+            }
+        )
     if args.gate == "release":
-        approved_action = "release"
+        next_action = {
+            "phase": state.phase.value,
+            "kind": "automatic",
+            "action": "release",
+            "approval_id": record.approval_id,
+            "target": record.target,
+        }
     elif state.phase is Phase.ROLLBACK_PENDING:
-        approved_action = "rollback"
+        next_action = {
+            "phase": state.phase.value,
+            "kind": "automatic",
+            "action": "rollback",
+            "approval_id": record.approval_id,
+            "target": record.target,
+        }
     else:
-        approved_action = "approve_release"
+        next_action = _policy_aware_pending_release_action(
+            repository,
+            args.run_id,
+            store,
+            state,
+        )
     return _success(
         "approve",
         gate=args.gate,
         approval_id=record.approval_id,
         target=record.target,
+        approval=approval,
         state=_state_payload(state),
-        next_action={
-            "phase": state.phase.value,
-            "kind": "automatic" if approved_action != "approve_release" else "human",
-            "action": approved_action,
-            "approval_id": record.approval_id,
-            "target": record.target,
-        },
+        next_action=next_action,
         evidence={
             "approval": str(
                 store.run_directory / "approvals" / f"{record.approval_id}.json"

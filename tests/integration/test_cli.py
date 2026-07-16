@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ship_flow import release as release_module
-from ship_flow.authorization import AuthorizationStore
+from ship_flow.authorization import AuthorizationStore, ExecutionMode
 from ship_flow.cli import _approval_aware_next_action, main as cli_main
 from ship_flow.gitops import GitRepository, commit_candidate
 from ship_flow.manifest import (
@@ -1250,7 +1250,7 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
                     ),
                     effect="external_write",
                     idempotency="safe",
-                    data_impact="possible",
+                    data_impact="none",
                 ),
             ),
         )
@@ -1387,6 +1387,129 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             for path in self.store.run_directory.rglob("*")
             if path.is_file()
         }
+
+    def select_mode(self, mode: ExecutionMode) -> None:
+        AuthorizationStore(self.store).create_initial(
+            mode=mode,
+            goal="ship approval-aware fixture",
+            repository=self.primary,
+            worktree=self.ownership.worktree_path,
+            branch=self.ownership.branch,
+            manifest_sha256=manifest_digest(self.manifest),
+            release_target="production",
+            previous_release="release-v1",
+            state_revision=self.store.load().revision,
+        )
+
+    def rollback_preapproval(self, mode: ExecutionMode) -> dict[str, object]:
+        self.select_mode(mode)
+        release_approval = self.engine.record_approval(
+            gate="release",
+            target="production",
+            approver_actor="release-owner",
+            expires_at="2999-01-01T00:00:00Z",
+        )
+        revision = self.store.load().revision
+        completed = subprocess.run(
+            (
+                sys.executable,
+                "-m",
+                "ship_flow",
+                "approve",
+                "--repo",
+                str(self.primary),
+                "--run-id",
+                self.run_id,
+                "--expected-revision",
+                str(revision),
+                "--gate",
+                "rollback",
+                "--actor",
+                "rollback-owner",
+                "--target",
+                "production",
+                "--expires-at",
+                "2999-01-01T00:00:00Z",
+                "--failed-release-id",
+                release_approval.approval_id,
+                "--previous-release",
+                "release-v1",
+                "--json",
+            ),
+            cwd=self.primary,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout={completed.stdout!r}\nstderr={completed.stderr!r}",
+        )
+        payload = json.loads(completed.stdout)
+        payload["release_approval_id"] = release_approval.approval_id
+        return payload
+
+    def test_autonomous_safe_rollback_preapproval_keeps_release_action_identity(
+        self,
+    ) -> None:
+        payload = self.rollback_preapproval(ExecutionMode.AUTONOMOUS)
+        release_approval_id = payload.pop("release_approval_id")
+        rollback_approval_id = payload["approval_id"]
+
+        self.assertNotEqual(rollback_approval_id, release_approval_id)
+        self.assertEqual(
+            payload["next_action"],
+            {
+                "phase": "AWAITING_RELEASE_APPROVAL",
+                "kind": "automatic",
+                "action": "release",
+                "approval_id": release_approval_id,
+                "target": "production",
+            },
+        )
+        self.assertEqual(
+            payload["approval"],
+            {
+                "gate": "rollback",
+                "approval_id": rollback_approval_id,
+                "target": "production",
+                "failed_release_id": release_approval_id,
+                "previous_release": "release-v1",
+            },
+        )
+
+    def test_strict_safe_rollback_preapproval_keeps_release_human_gate(
+        self,
+    ) -> None:
+        payload = self.rollback_preapproval(ExecutionMode.STRICT)
+        release_approval_id = payload.pop("release_approval_id")
+        rollback_approval_id = payload["approval_id"]
+
+        self.assertEqual(
+            payload["next_action"],
+            {
+                "phase": "AWAITING_RELEASE_APPROVAL",
+                "kind": "human",
+                "action": "approve_release",
+            },
+        )
+        self.assertEqual(
+            payload["approval"],
+            {
+                "gate": "rollback",
+                "approval_id": rollback_approval_id,
+                "target": "production",
+                "failed_release_id": release_approval_id,
+                "previous_release": "release-v1",
+            },
+        )
 
     def test_default_expiry_approve_recovers_orphan_and_response_lost_retry(
         self,
