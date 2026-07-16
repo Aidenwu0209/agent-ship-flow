@@ -98,11 +98,18 @@ class BeginnerCliFlowTests(unittest.TestCase):
         self.assertIsInstance(state, dict)
         return state  # type: ignore[return-value]
 
-    def start_awaiting_plan_approval(self) -> tuple[dict[str, object], int]:
+    def start_awaiting_plan_approval(
+        self,
+        *,
+        mode: str = "autonomous",
+    ) -> tuple[dict[str, object], int, dict[str, object]]:
         self.success(
             "init",
             "--repo",
             str(self.primary),
+            "--mode",
+            mode,
+            "--accept-detected",
         )
         git(self.primary, "add", ".ship/manifest.toml")
         git(self.primary, "commit", "-m", "confirm scope manifest")
@@ -120,6 +127,8 @@ class BeginnerCliFlowTests(unittest.TestCase):
             str(self.worktree),
             "--release-target",
             "production",
+            "--mode",
+            mode,
         )
         plan_source = self.root / "scope plan.md"
         plan_source.write_text(
@@ -152,10 +161,10 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "--verdict",
             "pass",
         )
-        return started, int(self.state(reviewed)["revision"])
+        return started, int(self.state(reviewed)["revision"]), reviewed
 
     def start_developing(self) -> tuple[dict[str, object], int]:
-        started, revision = self.start_awaiting_plan_approval()
+        started, revision, _ = self.start_awaiting_plan_approval()
         approved = self.success(
             "approve",
             "--repo",
@@ -271,6 +280,15 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "pass",
         )
         self.assertEqual(self.state(plan_reviewed)["phase"], "AWAITING_PLAN_APPROVAL")
+        self.assertEqual(
+            plan_reviewed["next_action"],
+            {
+                "phase": "AWAITING_PLAN_APPROVAL",
+                "kind": "automatic",
+                "action": "authorize_plan",
+                "authorization_source": "contract",
+            },
+        )
         revision = int(self.state(plan_reviewed)["revision"])
 
         approved = self.success(
@@ -373,6 +391,15 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "verifier-context",
         )
         self.assertEqual(self.state(verified)["phase"], "AWAITING_RELEASE_APPROVAL")
+        self.assertEqual(
+            verified["next_action"],
+            {
+                "phase": "AWAITING_RELEASE_APPROVAL",
+                "kind": "automatic",
+                "action": "authorize_release",
+                "authorization_source": "contract",
+            },
+        )
         self.assertFalse(self.sentinel.exists())
 
         resumed = self.success(
@@ -435,7 +462,90 @@ class BeginnerCliFlowTests(unittest.TestCase):
             self.state(synced)["phase"],
             "AWAITING_CLEANUP_APPROVAL",
         )
+        self.assertEqual(
+            synced["next_action"],
+            {
+                "phase": "AWAITING_CLEANUP_APPROVAL",
+                "kind": "automatic",
+                "action": "cleanup",
+                "authorization_source": "contract",
+            },
+        )
         self.assertFalse(self.sentinel.exists())
+
+    def test_immediate_plan_review_response_uses_selected_mode_policy(self) -> None:
+        _, _, autonomous = self.start_awaiting_plan_approval()
+        self.assertEqual(
+            autonomous["next_action"],
+            {
+                "phase": "AWAITING_PLAN_APPROVAL",
+                "kind": "automatic",
+                "action": "authorize_plan",
+                "authorization_source": "contract",
+            },
+        )
+
+    def test_immediate_strict_plan_review_response_keeps_human_gate(self) -> None:
+        _, _, strict = self.start_awaiting_plan_approval(mode="strict")
+        self.assertEqual(
+            strict["next_action"],
+            {
+                "phase": "AWAITING_PLAN_APPROVAL",
+                "kind": "human",
+                "action": "approve_plan",
+            },
+        )
+
+    def test_repeated_identical_start_recovers_after_progress_and_rejects_mismatch(
+        self,
+    ) -> None:
+        started, revision, _ = self.start_awaiting_plan_approval()
+
+        recovered = self.success(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "ship the requested repository change",
+            "--branch",
+            "ship/scope-cli-001",
+            "--worktree",
+            str(self.worktree),
+            "--release-target",
+            "production",
+        )
+        self.assertEqual(self.state(recovered)["revision"], revision)
+        self.assertEqual(recovered["authorization"], started["authorization"])
+
+        repository = GitRepository.discover(self.primary)
+        store = StateStore(
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        state_before = store.state_path.read_bytes()
+        events_before = store.events_path.read_bytes()
+        mismatched = self.cli(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "silently expand the original goal",
+            "--branch",
+            "ship/scope-cli-001",
+            "--worktree",
+            str(self.worktree),
+            "--release-target",
+            "production",
+        )
+        self.assertEqual(mismatched.returncode, 5)
+        self.assertEqual(
+            json.loads(mismatched.stdout)["error"]["code"], "invalid_input"
+        )
+        self.assertEqual(store.state_path.read_bytes(), state_before)
+        self.assertEqual(store.events_path.read_bytes(), events_before)
 
     def test_strict_mode_is_selected_before_start(self) -> None:
         detected = self.success(
@@ -533,7 +643,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
     def test_autonomous_status_has_no_routine_human_gate_and_keeps_blocked_manual(
         self,
     ) -> None:
-        _, revision = self.start_awaiting_plan_approval()
+        _, revision, _ = self.start_awaiting_plan_approval()
 
         status = self.success(
             "status",

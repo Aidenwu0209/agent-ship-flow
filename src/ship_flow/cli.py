@@ -254,6 +254,20 @@ def _current_authorization(store: StateStore) -> AuthorizationContract | None:
     return AuthorizationStore(store).current()
 
 
+def _policy_aware_state_action(
+    store: StateStore,
+    state: RunState,
+) -> dict[str, object]:
+    if type(store) is not StateStore:
+        return _next_action_payload(state)
+    authorizations = AuthorizationStore(store)
+    return _policy_aware_next_action(
+        state,
+        authorizations=authorizations,
+        contract=_current_authorization(store),
+    )
+
+
 def _policy_aware_next_action(
     run: RunState | ReconciledRun,
     *,
@@ -645,7 +659,20 @@ def _handle_start(args: argparse.Namespace) -> dict[str, object]:
         worktree_path=worktree,
     )
     manifest = _load_safe_manifest(ownership.worktree_path)
-    contract = AuthorizationStore(store).create_initial(
+    authorizations = AuthorizationStore(store)
+    existing_contract = _current_authorization(store)
+    if existing_contract is not None and existing_contract.generation != 1:
+        raise CliFailure(
+            "phase_conflict",
+            "运行授权已扩展，不能作为初始启动重试。",
+            4,
+        )
+    initial_state_revision = (
+        existing_contract.state_revision
+        if existing_contract is not None
+        else state.revision
+    )
+    contract = authorizations.create_initial(
         mode=ExecutionMode(args.mode),
         goal=args.goal,
         repository=repository.primary_checkout.resolve(),
@@ -654,14 +681,18 @@ def _handle_start(args: argparse.Namespace) -> dict[str, object]:
         manifest_sha256=manifest_digest(manifest),
         release_target=args.release_target,
         previous_release=args.previous_release,
-        state_revision=state.revision,
+        state_revision=initial_state_revision,
     )
     return _success(
         "start",
         state=_state_payload(state),
         worktree=str(ownership.worktree_path),
         branch=ownership.branch,
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_next_action(
+            state,
+            authorizations=authorizations,
+            contract=contract,
+        ),
         authorization={
             "mode": contract.mode.value,
             "source": "contract",
@@ -805,10 +836,11 @@ def _handle_set_plan(args: argparse.Namespace) -> dict[str, object]:
         expected_revision=args.expected_revision,
     )
     run_directory = _run_directory(repository, args.run_id)
+    store = StateStore(run_directory)
     return _success(
         "set-plan",
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         subject={"digest": subject.digest()},
         evidence={"plan": str(run_directory / "plan.md")},
     )
@@ -852,7 +884,7 @@ def _record_review_command(
     return _success(
         command,
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         verdict=args.verdict,
         evidence={
             "review": str(
@@ -882,7 +914,7 @@ def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
             gate="plan",
             approval_id=record.approval_id,
             state=_state_payload(state),
-            next_action=_next_action_payload(state),
+            next_action=_policy_aware_state_action(store, state),
             evidence={
                 "approval": str(
                     store.run_directory
@@ -1007,7 +1039,7 @@ def _handle_verify(args: argparse.Namespace) -> dict[str, object]:
     return _success(
         "verify",
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         evidence={
             "verification": str(
                 store.run_directory
@@ -1063,7 +1095,7 @@ def _handle_release(args: argparse.Namespace) -> dict[str, object]:
         approval_id=approval_id,
         resumed=resumed,
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         operations=[
             _operation_payload(record, adjudicated_applied=resumed)
             for record in records
@@ -1116,7 +1148,7 @@ def _handle_reconcile_operation(args: argparse.Namespace) -> dict[str, object]:
     return _success(
         "reconcile-operation",
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         adjudication=_adjudication_payload(adjudication),
         evidence={"release": str(store.run_directory / "release-cycles")},
     )
@@ -1160,7 +1192,7 @@ def _handle_rollback(args: argparse.Namespace) -> dict[str, object]:
             verified=True,
             healthy=healthy,
             state=_state_payload(state),
-            next_action=_next_action_payload(state),
+            next_action=_policy_aware_state_action(store, state),
             operations=[],
             evidence={"release": str(store.run_directory / "release-cycles")},
         )
@@ -1182,7 +1214,7 @@ def _handle_rollback(args: argparse.Namespace) -> dict[str, object]:
         approval_id=approval_id,
         resumed=resumed,
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         operations=[
             _operation_payload(record, adjudicated_applied=resumed)
             for record in records
@@ -1223,7 +1255,7 @@ def _handle_record_sync(args: argparse.Namespace) -> dict[str, object]:
     return _success(
         "record-sync",
         state=_state_payload(state),
-        next_action=_next_action_payload(state),
+        next_action=_policy_aware_state_action(store, state),
         subject={"digest": report.subject_digest},
         evidence={"sync": str(store.run_directory / "sync-report.json")},
     )
@@ -1250,7 +1282,7 @@ def _handle_cleanup(args: argparse.Namespace) -> dict[str, object]:
     return _success(
         "cleanup",
         state=_state_payload(completed.state),
-        next_action=_next_action_payload(completed.state),
+        next_action=_policy_aware_state_action(store, completed.state),
         removed_worktree=str(ownership.worktree_path),
         evidence={"events": str(store.events_path)},
     )
