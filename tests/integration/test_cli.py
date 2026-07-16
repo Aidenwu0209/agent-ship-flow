@@ -8,14 +8,23 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from ship_flow import release as release_module
+from ship_flow.authorization import AuthorizationStore
 from ship_flow.cli import _approval_aware_next_action, main as cli_main
 from ship_flow.gitops import GitRepository, commit_candidate
-from ship_flow.manifest import CommandSpec, Manifest, OperationSpec, write_manifest
+from ship_flow.manifest import (
+    CommandSpec,
+    Manifest,
+    OperationSpec,
+    load_manifest,
+    manifest_digest,
+    write_manifest,
+)
 from ship_flow.model import Phase, RunState
 from ship_flow.reconcile import (
     EvidenceInventory,
@@ -89,6 +98,80 @@ class BeginnerCliFlowTests(unittest.TestCase):
         self.assertIsInstance(state, dict)
         return state  # type: ignore[return-value]
 
+    def start_awaiting_plan_approval(self) -> tuple[dict[str, object], int]:
+        self.success(
+            "init",
+            "--repo",
+            str(self.primary),
+        )
+        git(self.primary, "add", ".ship/manifest.toml")
+        git(self.primary, "commit", "-m", "confirm scope manifest")
+        started = self.success(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "ship the requested repository change",
+            "--branch",
+            "ship/scope-cli-001",
+            "--worktree",
+            str(self.worktree),
+            "--release-target",
+            "production",
+        )
+        plan_source = self.root / "scope plan.md"
+        plan_source.write_text(
+            "# Plan\n\nImplement and independently verify the requested change.\n",
+            encoding="utf-8",
+        )
+        planned = self.success(
+            "set-plan",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(started)["revision"]),
+            "--file",
+            str(plan_source),
+        )
+        reviewed = self.success(
+            "record-plan-review",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(planned)["revision"]),
+            "--source-actor",
+            "planner-context",
+            "--reviewer",
+            "plan-critic-context",
+            "--verdict",
+            "pass",
+        )
+        return started, int(self.state(reviewed)["revision"])
+
+    def start_developing(self) -> tuple[dict[str, object], int]:
+        started, revision = self.start_awaiting_plan_approval()
+        approved = self.success(
+            "approve",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+            "--actor",
+            "human-owner",
+        )
+        self.assertEqual(self.state(approved)["phase"], "DEVELOPING")
+        return started, int(self.state(approved)["revision"])
+
     def test_beginner_flow_reaches_release_gate_without_external_effects(self) -> None:
         initialized = self.success(
             "init",
@@ -105,7 +188,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
         self.assertEqual(
             initialized["next_action"],
             {
-                "kind": "human",
+                "kind": "automatic",
                 "action": "commit_manifest",
                 "manifest": str(manifest_path),
             },
@@ -127,10 +210,31 @@ class BeginnerCliFlowTests(unittest.TestCase):
             str(self.worktree),
         )
         self.assertEqual(self.state(started)["phase"], "PLANNING")
+        self.assertEqual(started["authorization"]["mode"], "autonomous")  # type: ignore[index]
+        self.assertEqual(started["authorization"]["generation"], 1)  # type: ignore[index]
+        self.assertRegex(
+            str(started["authorization"]["digest"]),  # type: ignore[index]
+            r"^[0-9a-f]{64}$",
+        )
         revision = int(self.state(started)["revision"])
         self.assertEqual(
             Path(str(started["worktree"])).resolve(), self.worktree.resolve()
         )
+
+        recovered = self.success(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "add a safe beginner feature",
+            "--branch",
+            "ship/cli-001",
+            "--worktree",
+            str(self.worktree),
+        )
+        self.assertEqual(recovered["authorization"], started["authorization"])
 
         plan_source = self.root / "approved plan.md"
         plan_source.write_text(
@@ -332,6 +436,336 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "AWAITING_CLEANUP_APPROVAL",
         )
         self.assertFalse(self.sentinel.exists())
+
+    def test_strict_mode_is_selected_before_start(self) -> None:
+        detected = self.success(
+            "init",
+            "--repo",
+            str(self.primary),
+            "--mode",
+            "strict",
+        )
+        self.assertEqual(
+            detected["next_action"],
+            {"kind": "human", "action": "confirm_detected_manifest"},
+        )
+        self.assertFalse((self.primary / ".ship" / "manifest.toml").exists())
+
+        initialized = self.success(
+            "init",
+            "--repo",
+            str(self.primary),
+            "--mode",
+            "strict",
+            "--accept-detected",
+        )
+        git(self.primary, "add", ".ship/manifest.toml")
+        git(self.primary, "commit", "-m", "confirm strict manifest")
+
+        started = self.success(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "audit every workflow gate",
+            "--branch",
+            "ship/strict-cli-001",
+            "--worktree",
+            str(self.worktree),
+            "--mode",
+            "strict",
+        )
+        self.assertEqual(initialized["next_action"]["kind"], "human")  # type: ignore[index]
+        self.assertEqual(started["authorization"]["mode"], "strict")  # type: ignore[index]
+        self.assertEqual(started["authorization"]["source"], "contract")  # type: ignore[index]
+        self.assertEqual(started["authorization"]["generation"], 1)  # type: ignore[index]
+
+    def test_direct_library_run_without_contract_uses_strict_compatibility(
+        self,
+    ) -> None:
+        write_manifest(
+            self.primary / ".ship" / "manifest.toml",
+            Manifest(
+                project_name="legacy-cli-fixture",
+                base_branch="main",
+                remote="origin",
+                verification_steps=(
+                    CommandSpec(
+                        "unit",
+                        (sys.executable, "-c", "pass"),
+                        "unit",
+                    ),
+                ),
+                release_required=False,
+            ),
+        )
+        git(self.primary, "add", ".ship/manifest.toml")
+        git(self.primary, "commit", "-m", "confirm legacy manifest")
+        repository = GitRepository.discover(self.primary)
+        started = start_run(
+            repository,
+            run_id=self.run_id,
+            branch="ship/legacy-cli-001",
+            worktree_path=self.worktree,
+        )
+
+        status = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+
+        self.assertEqual(self.state(status)["revision"], started.state.revision)
+        self.assertEqual(
+            status["authorization"],
+            {
+                "mode": "strict",
+                "source": "legacy_default",
+                "generation": None,
+                "digest": None,
+            },
+        )
+
+    def test_autonomous_status_has_no_routine_human_gate_and_keeps_blocked_manual(
+        self,
+    ) -> None:
+        _, revision = self.start_awaiting_plan_approval()
+
+        status = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+        self.assertEqual(
+            status["next_action"],
+            {
+                "phase": "AWAITING_PLAN_APPROVAL",
+                "kind": "automatic",
+                "action": "authorize_plan",
+                "authorization_source": "contract",
+            },
+        )
+
+        repository = GitRepository.discover(self.primary)
+        store = StateStore(
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        store.reconcile_transition(
+            Phase.BLOCKED,
+            expected_revision=revision,
+            reason="test-manual-reconciliation",
+        )
+        blocked = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+        self.assertEqual(
+            blocked["next_action"],
+            {
+                "phase": "BLOCKED",
+                "kind": "manual",
+                "action": "manual_reconciliation",
+            },
+        )
+
+    def test_scope_change_can_be_requested_and_approved(self) -> None:
+        _, revision = self.start_developing()
+        current_manifest_sha256 = manifest_digest(
+            load_manifest(self.worktree / ".ship" / "manifest.toml")
+        )
+
+        requested = self.success(
+            "request-scope-change",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--reason",
+            "feature_expansion",
+            "--summary",
+            "add deployment dashboard",
+            "--goal",
+            "ship the feature and deployment dashboard",
+            "--manifest-sha256",
+            current_manifest_sha256,
+            "--release-target",
+            "production",
+        )
+        request_id = str(requested["scope_change"]["request_id"])  # type: ignore[index]
+        self.assertRegex(request_id, r"^[0-9a-f]{64}$")
+        self.assertEqual(self.state(requested)["phase"], "AWAITING_SCOPE_APPROVAL")
+        self.assertEqual(
+            requested["next_action"],
+            {
+                "phase": "AWAITING_SCOPE_APPROVAL",
+                "kind": "human",
+                "action": "approve_scope_change",
+                "request_id": request_id,
+            },
+        )
+
+        status = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+        self.assertEqual(status["next_action"], requested["next_action"])
+        resolved = self.success(
+            "resolve-scope-change",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(status)["revision"]),
+            "--decision",
+            "approve",
+            "--actor",
+            "human-owner",
+        )
+        self.assertEqual(self.state(resolved)["phase"], "PLANNING")
+        self.assertEqual(resolved["authorization"]["generation"], 2)  # type: ignore[index]
+
+    def test_rejected_scope_change_keeps_current_contract(self) -> None:
+        started, revision = self.start_developing()
+        current_manifest_sha256 = manifest_digest(
+            load_manifest(self.worktree / ".ship" / "manifest.toml")
+        )
+        requested = self.success(
+            "request-scope-change",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--reason",
+            "feature_expansion",
+            "--summary",
+            "add deployment dashboard",
+            "--goal",
+            "ship the feature and deployment dashboard",
+            "--manifest-sha256",
+            current_manifest_sha256,
+            "--release-target",
+            "production",
+        )
+        rejected = self.success(
+            "resolve-scope-change",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(requested)["revision"]),
+            "--decision",
+            "reject",
+            "--actor",
+            "human-owner",
+        )
+        self.assertEqual(self.state(rejected)["phase"], "PLANNING")
+        self.assertEqual(rejected["authorization"]["generation"], 1)  # type: ignore[index]
+        self.assertEqual(
+            rejected["authorization"]["digest"],  # type: ignore[index]
+            started["authorization"]["digest"],  # type: ignore[index]
+        )
+
+    def test_manifest_drift_status_is_read_only_and_requests_scope_change(
+        self,
+    ) -> None:
+        started, _ = self.start_developing()
+        repository = GitRepository.discover(self.primary)
+        store = StateStore(
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        manifest_path = self.worktree / ".ship" / "manifest.toml"
+        changed_manifest = replace(
+            load_manifest(manifest_path),
+            max_review_rounds=4,
+        )
+        write_manifest(manifest_path, changed_manifest)
+        proposed_digest = manifest_digest(changed_manifest)
+        state_before = store.state_path.read_bytes()
+        events_before = store.events_path.read_bytes()
+
+        status = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+
+        self.assertEqual(store.state_path.read_bytes(), state_before)
+        self.assertEqual(store.events_path.read_bytes(), events_before)
+        self.assertIsNone(AuthorizationStore(store).pending())
+        self.assertEqual(
+            status["next_action"],
+            {
+                "phase": "DEVELOPING",
+                "kind": "automatic",
+                "action": "request_scope_change",
+                "reason": "manifest_drift",
+                "contract_digest": started["authorization"]["digest"],  # type: ignore[index]
+                "proposed_manifest_sha256": proposed_digest,
+            },
+        )
+
+        requested = self.success(
+            "request-scope-change",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(status)["revision"]),
+            "--reason",
+            "manifest_drift",
+            "--summary",
+            "verification manifest changed",
+            "--goal",
+            "ship the requested repository change",
+            "--manifest-sha256",
+            proposed_digest,
+            "--release-target",
+            "production",
+        )
+        request_id = str(requested["scope_change"]["request_id"])  # type: ignore[index]
+        scope_state_before = store.state_path.read_bytes()
+        scope_events_before = store.events_path.read_bytes()
+
+        pending = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+
+        self.assertEqual(store.state_path.read_bytes(), scope_state_before)
+        self.assertEqual(store.events_path.read_bytes(), scope_events_before)
+        self.assertEqual(
+            pending["next_action"],
+            {
+                "phase": "AWAITING_SCOPE_APPROVAL",
+                "kind": "human",
+                "action": "approve_scope_change",
+                "request_id": request_id,
+            },
+        )
 
 
 class ResumePublicationCliTests(unittest.TestCase):

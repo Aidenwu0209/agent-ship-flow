@@ -11,6 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from .authorization import (
+    AuthorizationContract,
+    AuthorizationStore,
+    ExecutionMode,
+)
 from .gitops import (
     CandidateSafetyError,
     CleanupRefusedError,
@@ -26,13 +31,15 @@ from .manifest import (
     manifest_digest,
     write_manifest,
 )
-from .model import Phase, RunState
+from .model import LEGAL_TRANSITIONS, Phase, RunState
 from .reconcile import (
     EvidenceInventory,
+    EvidenceStatus,
     ReconciledRun,
     ReconciliationError,
     ReconciliationRecoveryError,
     Reconciler,
+    _load_safe_manifest,
     next_action,
     record_plan_approval,
 )
@@ -229,21 +236,118 @@ def _approval_aware_next_action(run: ReconciledRun) -> dict[str, str]:
     return recovered
 
 
+def _authorization_payload(
+    contract: AuthorizationContract | None,
+) -> dict[str, object]:
+    return {
+        "mode": contract.mode.value if contract else "strict",
+        "source": "contract" if contract else "legacy_default",
+        "generation": contract.generation if contract else None,
+        "digest": contract.digest() if contract else None,
+    }
+
+
+def _current_authorization(store: StateStore) -> AuthorizationContract | None:
+    path = store.run_directory / "authorization"
+    if not os.path.lexists(path):
+        return None
+    return AuthorizationStore(store).current()
+
+
+def _policy_aware_next_action(
+    run: RunState | ReconciledRun,
+    *,
+    authorizations: AuthorizationStore,
+    contract: AuthorizationContract | None,
+    recover_approval: bool = False,
+) -> dict[str, object]:
+    action: dict[str, object] = (
+        _approval_aware_next_action(run)
+        if recover_approval and isinstance(run, ReconciledRun)
+        else _next_action_payload(run)
+    )
+    state = run.state if isinstance(run, ReconciledRun) else run
+    if state.phase is Phase.AWAITING_SCOPE_APPROVAL:
+        pending = authorizations.pending()
+        if pending is None:
+            raise StateCorruptionError("scope approval is missing its request")
+        return {
+            "phase": state.phase.value,
+            "kind": "human",
+            "action": "approve_scope_change",
+            "request_id": pending.request_id,
+        }
+    if contract is None:
+        return action
+    if state.phase is Phase.BLOCKED:
+        return action
+    manifest = run.manifest if isinstance(run, ReconciledRun) else None
+    if (
+        manifest is not None
+        and manifest_digest(manifest) != contract.manifest_sha256
+        and Phase.AWAITING_SCOPE_APPROVAL in LEGAL_TRANSITIONS[state.phase]
+    ):
+        return {
+            "phase": state.phase.value,
+            "kind": "automatic",
+            "action": "request_scope_change",
+            "reason": "manifest_drift",
+            "contract_digest": contract.digest(),
+            "proposed_manifest_sha256": manifest_digest(manifest),
+        }
+    if contract.mode is ExecutionMode.STRICT:
+        return action
+    automatic_gates = {
+        "approve_plan": "authorize_plan",
+        "approve_release": "authorize_release",
+        "approve_rollback": "authorize_rollback",
+        "approve_cleanup": "cleanup",
+    }
+    automatic = automatic_gates.get(str(action.get("action")))
+    if action.get("kind") == "human" and automatic is not None:
+        return {
+            "phase": state.phase.value,
+            "kind": "automatic",
+            "action": automatic,
+            "authorization_source": "contract",
+        }
+    return action
+
+
 def _run_payload(
     run: ReconciledRun,
     *,
+    store: StateStore | None = None,
     recover_approval: bool = False,
 ) -> dict[str, object]:
+    if store is None and isinstance(run.ownership, WorktreeOwnership):
+        store = StateStore(run.ownership.record_path.parent)
+    authorizations = AuthorizationStore(store) if store is not None else None
+    contract = _current_authorization(store) if store is not None else None
     payload: dict[str, object] = {
         "state": _state_payload(run.state),
         "reason": run.reason,
         "next_action": (
-            _approval_aware_next_action(run)
-            if recover_approval
-            else _next_action_payload(run)
+            _policy_aware_next_action(
+                run,
+                authorizations=authorizations,
+                contract=contract,
+                recover_approval=recover_approval,
+            )
+            if authorizations is not None
+            else (
+                _approval_aware_next_action(run)
+                if recover_approval
+                else _next_action_payload(run)
+            )
         ),
         "evidence_status": _inventory_payload(run.evidence),
+        "authorization": _authorization_payload(contract),
     }
+    if authorizations is not None and contract is not None:
+        pending = authorizations.pending()
+        if pending is not None:
+            payload["scope_change"] = pending.to_dict()
     if run.ownership is not None:
         payload["worktree"] = str(run.ownership.worktree_path)
         payload["branch"] = run.ownership.branch
@@ -479,7 +583,8 @@ def _handle_init(args: argparse.Namespace) -> dict[str, object]:
             evidence={"manifest": str(path)},
             manifest_sha256=manifest_digest(confirmed),
         )
-    if not args.accept_detected:
+    mode = ExecutionMode(args.mode)
+    if mode is ExecutionMode.STRICT and not args.accept_detected:
         return _success(
             "init",
             accepted=False,
@@ -500,7 +605,7 @@ def _handle_init(args: argparse.Namespace) -> dict[str, object]:
         accepted=True,
         created=True,
         next_action={
-            "kind": "human",
+            "kind": "automatic" if mode is ExecutionMode.AUTONOMOUS else "human",
             "action": "commit_manifest",
             "manifest": str(path),
         },
@@ -539,12 +644,30 @@ def _handle_start(args: argparse.Namespace) -> dict[str, object]:
         branch=branch,
         worktree_path=worktree,
     )
+    manifest = _load_safe_manifest(ownership.worktree_path)
+    contract = AuthorizationStore(store).create_initial(
+        mode=ExecutionMode(args.mode),
+        goal=args.goal,
+        repository=repository.primary_checkout.resolve(),
+        worktree=ownership.worktree_path.resolve(),
+        branch=ownership.branch,
+        manifest_sha256=manifest_digest(manifest),
+        release_target=args.release_target,
+        previous_release=args.previous_release,
+        state_revision=state.revision,
+    )
     return _success(
         "start",
         state=_state_payload(state),
         worktree=str(ownership.worktree_path),
         branch=ownership.branch,
         next_action=_next_action_payload(state),
+        authorization={
+            "mode": contract.mode.value,
+            "source": "contract",
+            "generation": contract.generation,
+            "digest": contract.digest(),
+        },
         evidence={
             "state": str(store.state_path),
             "events": str(store.events_path),
@@ -555,8 +678,111 @@ def _handle_start(args: argparse.Namespace) -> dict[str, object]:
 
 def _handle_status(args: argparse.Namespace) -> dict[str, object]:
     repository = _repository(args.repo)
+    store = (
+        StateStore(_run_directory(repository, args.run_id))
+        if isinstance(repository, GitRepository)
+        else None
+    )
+    contract = _current_authorization(store) if store is not None else None
+    if contract is not None and store is not None:
+        state = store.load()
+        try:
+            manifest = _load_safe_manifest(Path(contract.worktree))
+        except ReconciliationRecoveryError:
+            manifest = None
+        if (
+            manifest is not None
+            and manifest_digest(manifest) != contract.manifest_sha256
+            and Phase.AWAITING_SCOPE_APPROVAL in LEGAL_TRANSITIONS[state.phase]
+        ):
+            stale = EvidenceInventory(
+                plan_approval=EvidenceStatus.STALE,
+                code_review=EvidenceStatus.STALE,
+                verification=EvidenceStatus.STALE,
+                release_or_external=EvidenceStatus.STALE,
+                sync=EvidenceStatus.STALE,
+            )
+            drift = ReconciledRun(
+                state=state,
+                ownership=None,
+                manifest=manifest,
+                subject=None,
+                plan_approval=None,
+                dirty=None,
+                reason="manifest-drift-requires-scope-change",
+                evidence=stale,
+            )
+            payload = _run_payload(drift, store=store, recover_approval=False)
+            payload["worktree"] = contract.worktree
+            payload["branch"] = contract.branch
+            return _success("status", **payload)
     run = Reconciler(repository).reconcile(args.run_id)
-    return _success("status", **_run_payload(run, recover_approval=True))
+    return _success(
+        "status",
+        **_run_payload(run, store=store, recover_approval=True),
+    )
+
+
+def _handle_request_scope_change(args: argparse.Namespace) -> dict[str, object]:
+    repository = _repository(args.repo)
+    ownership, store = _load_run(repository, args.run_id)
+    _require_expected_revision(store, args.expected_revision)
+    authorizations = AuthorizationStore(store)
+    request = authorizations.request_change(
+        reason=args.reason,
+        summary=args.summary,
+        proposed_goal=args.goal,
+        proposed_manifest_sha256=args.manifest_sha256,
+        proposed_release_target=args.release_target,
+        proposed_previous_release=args.previous_release,
+        expected_revision=args.expected_revision,
+    )
+    state = store.load()
+    contract = authorizations.current()
+    if contract is None:
+        raise StateCorruptionError("scope change lost its authorization contract")
+    return _success(
+        "request-scope-change",
+        state=_state_payload(state),
+        worktree=str(ownership.worktree_path),
+        branch=ownership.branch,
+        authorization=_authorization_payload(contract),
+        scope_change=request.to_dict(),
+        next_action=_policy_aware_next_action(
+            state,
+            authorizations=authorizations,
+            contract=contract,
+        ),
+    )
+
+
+def _handle_resolve_scope_change(args: argparse.Namespace) -> dict[str, object]:
+    repository = _repository(args.repo)
+    ownership, store = _load_run(repository, args.run_id)
+    _require_expected_revision(store, args.expected_revision)
+    authorizations = AuthorizationStore(store)
+    contract = authorizations.resolve_change(
+        decision=args.decision,
+        actor=args.actor,
+        expected_revision=args.expected_revision,
+    )
+    state = store.load()
+    resolution = authorizations.latest_resolution()
+    if resolution is None:
+        raise StateCorruptionError("scope resolution evidence is missing")
+    return _success(
+        "resolve-scope-change",
+        state=_state_payload(state),
+        worktree=str(ownership.worktree_path),
+        branch=ownership.branch,
+        authorization=_authorization_payload(contract),
+        scope_change_resolution=resolution.to_dict(),
+        next_action=_policy_aware_next_action(
+            state,
+            authorizations=authorizations,
+            contract=contract,
+        ),
+    )
 
 
 def _handle_set_plan(args: argparse.Namespace) -> dict[str, object]:
@@ -1033,6 +1259,11 @@ def _handle_cleanup(args: argparse.Namespace) -> dict[str, object]:
 def _handle_resume(args: argparse.Namespace) -> dict[str, object]:
     repository = _repository(args.repo)
     run = Reconciler(repository).reconcile(args.run_id)
+    status_store = (
+        StateStore(_run_directory(repository, args.run_id))
+        if isinstance(repository, GitRepository)
+        else None
+    )
     review_reasons = {
         "plan-review-publication-recoverable",
         "code-review-publication-recoverable",
@@ -1079,12 +1310,15 @@ def _handle_resume(args: argparse.Namespace) -> dict[str, object]:
             ),
         }
     if recovered is None:
-        return _success("resume", **_run_payload(run, recover_approval=True))
+        return _success(
+            "resume",
+            **_run_payload(run, store=status_store, recover_approval=True),
+        )
     current = Reconciler(repository).reconcile(args.run_id)
     return _success(
         "resume",
         recovered=recovered,
-        **_run_payload(current, recover_approval=True),
+        **_run_payload(current, store=status_store, recover_approval=True),
     )
 
 
@@ -1112,6 +1346,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = commands.add_parser("init")
     _common(command, run=False)
+    command.add_argument(
+        "--mode",
+        choices=("autonomous", "strict"),
+        default="autonomous",
+    )
     command.add_argument("--accept-detected", action="store_true")
     command.set_defaults(handler=_handle_init)
 
@@ -1121,11 +1360,38 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--goal", required=True)
     command.add_argument("--branch")
     command.add_argument("--worktree")
+    command.add_argument(
+        "--mode",
+        choices=("autonomous", "strict"),
+        default="autonomous",
+    )
+    command.add_argument("--release-target")
+    command.add_argument("--previous-release")
     command.set_defaults(handler=_handle_start)
 
     command = commands.add_parser("status")
     _common(command)
     command.set_defaults(handler=_handle_status)
+
+    command = commands.add_parser("request-scope-change")
+    _mutation(command)
+    command.add_argument("--reason", required=True)
+    command.add_argument("--summary", required=True)
+    command.add_argument("--goal", required=True)
+    command.add_argument("--manifest-sha256", required=True)
+    command.add_argument("--release-target")
+    command.add_argument("--previous-release")
+    command.set_defaults(handler=_handle_request_scope_change)
+
+    command = commands.add_parser("resolve-scope-change")
+    _mutation(command)
+    command.add_argument(
+        "--decision",
+        choices=("approve", "reject"),
+        required=True,
+    )
+    command.add_argument("--actor", required=True)
+    command.set_defaults(handler=_handle_resolve_scope_change)
 
     command = commands.add_parser("set-plan")
     _mutation(command)

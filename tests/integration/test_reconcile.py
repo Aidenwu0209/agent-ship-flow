@@ -1248,6 +1248,7 @@ class NextActionTests(unittest.TestCase):
         human = {
             Phase.AWAITING_PLAN_APPROVAL,
             Phase.AWAITING_RELEASE_APPROVAL,
+            Phase.AWAITING_SCOPE_APPROVAL,
             Phase.ROLLBACK_PENDING,
             Phase.AWAITING_CLEANUP_APPROVAL,
         }

@@ -1467,6 +1467,7 @@ _NEXT_ACTIONS: Mapping[Phase, tuple[str, str]] = {
     Phase.PLANNING: ("automatic", "prepare_plan"),
     Phase.PLAN_REVIEW: ("automatic", "review_plan"),
     Phase.AWAITING_PLAN_APPROVAL: ("human", "approve_plan"),
+    Phase.AWAITING_SCOPE_APPROVAL: ("human", "approve_scope_change"),
     Phase.DEVELOPING: ("automatic", "develop"),
     Phase.CODE_REVIEW: ("automatic", "review_code"),
     Phase.VERIFYING: ("automatic", "verify"),
@@ -1564,6 +1565,7 @@ class Reconciler:
         pre_evidence_phases = {
             Phase.INITIALIZED,
             Phase.PLANNING,
+            Phase.AWAITING_SCOPE_APPROVAL,
         }
         terminal_phases = {
             Phase.BLOCKED,
