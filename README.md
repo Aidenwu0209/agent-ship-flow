@@ -20,6 +20,14 @@ one ready-made controller.
 The engine is intentionally agent-neutral: it needs Python 3.11+, Git, and an
 existing Git repository, but no external runtime dependency or model API.
 
+| Guarantee | What it means |
+| --- | --- |
+| Isolated worktrees | Development runs in an isolated worktree. |
+| Independent roles | Planner, Plan Critic, Developer, Reviewer, and Verifier remain independent. |
+| Evidence freshness | Review and verification evidence is bound to the current Git and manifest state; changed inputs make it unusable. |
+| Unknown-outcome recovery | An external `UNKNOWN` result is probed or sent for human adjudication; it is never blindly replayed. |
+| Human gates | Push, merge, release, deploy, data-impacting rollback, and cleanup remain explicit human decisions. |
+
 ## How the flow stays safe
 
 ```mermaid

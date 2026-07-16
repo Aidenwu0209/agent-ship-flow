@@ -18,6 +18,14 @@ Agent Ship Flow 将交付流程保存为可恢复的状态，而不是依赖 Age
 核心保持 Agent 无关：它需要 Python 3.11+、Git 和一个已有的 Git 仓库，但不需要
 外部运行时依赖或模型 API。
 
+| 保障 | 含义 |
+| --- | --- |
+| 隔离 worktree | 开发在隔离的 worktree 中进行。 |
+| 独立职责 | Planner、Plan Critic、Developer、Reviewer 和 Verifier 保持相互独立。 |
+| 证据时效性 | Review 和 Verification 证据绑定到当前 Git 与 manifest 状态；输入变化会使它们失效。 |
+| 未知结果恢复 | 外部操作结果为 `UNKNOWN` 时，系统会 probe 或转为人工裁定，不会盲目重放。 |
+| 人工关卡 | push、merge、release、deploy、可能影响数据的 rollback 和 cleanup 始终需要明确的人工决策。 |
+
 ## 流程如何保持安全
 
 ```mermaid
@@ -72,10 +80,12 @@ python3 -m unittest discover -s tests/unit -v
 python3 -m unittest discover -s tests/integration -v
 ruff format --check src/ship_flow tests scripts/install_codex_skill.py scripts/install-codex-skill.py
 ruff check src/ship_flow tests scripts/install_codex_skill.py scripts/install-codex-skill.py
+ship --help
 git diff --check
 ```
 
-GitHub Actions 会在 Python 3.11 和 3.12 上运行受支持的测试矩阵。
+GitHub Actions 会在 Python 3.12 上各运行一次 Ruff 格式检查和 lint 检查；unit、
+integration 与 `ship --help` smoke 检查会在 Python 3.11 和 3.12 上运行。
 
 ## 贡献、安全与许可证
 
