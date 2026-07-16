@@ -97,6 +97,41 @@ class AuthorizationStoreTests(unittest.TestCase):
             (self.run_directory / "authorization" / "requests").glob("*.json")
         )
 
+    def _leave_orphan_pending_after_interrupted_stale_cas(
+        self,
+    ) -> ScopeChangeRequest:
+        self._create_initial()
+        real_transition = self.store.transition
+
+        def supersede_gate_before_scope_transition(
+            next_phase: Phase | str,
+            *,
+            expected_revision: int,
+        ) -> object:
+            real_transition(Phase.PLANNING, expected_revision=expected_revision)
+            return real_transition(next_phase, expected_revision=expected_revision)
+
+        with (
+            mock.patch.object(
+                self.store,
+                "transition",
+                side_effect=supersede_gate_before_scope_transition,
+            ),
+            mock.patch.object(
+                self.authorizations,
+                "_remove_pending_if_matches_locked",
+                side_effect=SystemExit("simulated interruption before cleanup"),
+            ),
+        ):
+            with self.assertRaisesRegex(SystemExit, "simulated interruption"):
+                self._request_change(expected_revision=self.state.revision)
+
+        orphan = self.authorizations.pending()
+        assert orphan is not None
+        self.assertEqual(self.store.load().phase, Phase.PLANNING)
+        self.assertGreater(self.store.load().revision, orphan.gate_revision)
+        return orphan
+
     @staticmethod
     def _request_with_identity(
         request: ScopeChangeRequest,
@@ -444,6 +479,146 @@ class AuthorizationStoreTests(unittest.TestCase):
 
         assert replacement is not None
         self.assertEqual(self.authorizations.pending(), replacement)
+
+    def test_restart_reconciles_orphan_pending_and_allows_new_request(
+        self,
+    ) -> None:
+        orphan = self._leave_orphan_pending_after_interrupted_stale_cas()
+        orphan_archive = self._request_archive_path(orphan)
+        restarted_store = StateStore(self.run_directory)
+        restarted = AuthorizationStore(restarted_store)
+        contract = restarted.current()
+        assert contract is not None
+
+        request = restarted.request_change(
+            reason="goal_expansion",
+            summary="publish a valid request after restart",
+            proposed_goal="ship the requested repository change safely",
+            proposed_manifest_sha256="c" * 64,
+            proposed_release_target=contract.release_target,
+            proposed_previous_release=contract.previous_release,
+            expected_revision=restarted_store.load().revision,
+        )
+
+        self.assertNotEqual(request.request_id, orphan.request_id)
+        self.assertTrue(orphan_archive.is_file())
+        self.assertEqual(restarted.pending(), request)
+        self.assertEqual(
+            restarted_store.load().phase,
+            Phase.AWAITING_SCOPE_APPROVAL,
+        )
+
+    def test_restart_preserves_current_legitimate_scope_approval(self) -> None:
+        self._create_initial()
+        request = self._request_change()
+        awaiting = self.store.load()
+        restarted_store = StateStore(self.run_directory)
+        restarted = AuthorizationStore(restarted_store)
+        contract = restarted.current()
+        assert contract is not None
+
+        with self.assertRaises(ValueError):
+            restarted.request_change(
+                reason="goal_expansion",
+                summary="do not replace the current approval",
+                proposed_goal="ship a different scope",
+                proposed_manifest_sha256="c" * 64,
+                proposed_release_target=contract.release_target,
+                proposed_previous_release=contract.previous_release,
+                expected_revision=awaiting.revision,
+            )
+
+        self.assertEqual(restarted.pending(), request)
+        self.assertEqual(restarted_store.load(), awaiting)
+
+    def test_restart_does_not_clear_orphan_with_missing_contract(self) -> None:
+        orphan = self._leave_orphan_pending_after_interrupted_stale_cas()
+        invalid = self._request_with_identity(
+            orphan,
+            contract_digest="d" * 64,
+        )
+        authorization_module._atomic_write_private_json(
+            self._request_archive_path(invalid),
+            invalid.to_dict(),
+            trusted_root=self.store.trusted_root,
+            immutable=True,
+        )
+        authorization_module._atomic_write_private_json(
+            self.authorizations.pending_path,
+            invalid.to_dict(),
+            trusted_root=self.store.trusted_root,
+        )
+        restarted_store = StateStore(self.run_directory)
+        restarted = AuthorizationStore(restarted_store)
+        contract = restarted.current()
+        assert contract is not None
+
+        with self.assertRaises(StateCorruptionError):
+            restarted.request_change(
+                reason="goal_expansion",
+                summary="do not hide the invalid contract reference",
+                proposed_goal=contract.goal,
+                proposed_manifest_sha256="c" * 64,
+                proposed_release_target=contract.release_target,
+                proposed_previous_release=contract.previous_release,
+                expected_revision=restarted_store.load().revision,
+            )
+
+        self.assertEqual(restarted.pending(), invalid)
+
+    def test_restart_orphan_cleanup_preserves_a_replacement_pending_request(
+        self,
+    ) -> None:
+        orphan = self._leave_orphan_pending_after_interrupted_stale_cas()
+        restarted_store = StateStore(self.run_directory)
+        restarted = AuthorizationStore(restarted_store)
+        state = restarted_store.load()
+        contract = restarted.current()
+        assert contract is not None
+        real_remove = restarted._remove_pending_if_matches_locked
+        replacement: ScopeChangeRequest | None = None
+
+        def replace_before_removing(request: ScopeChangeRequest) -> None:
+            nonlocal replacement
+            replacement = self._request_with_identity(
+                request,
+                summary="a valid replacement pending request",
+                proposed_manifest_sha256="c" * 64,
+                gate_revision=state.revision,
+            )
+            authorization_module._atomic_write_private_json(
+                self._request_archive_path(replacement),
+                replacement.to_dict(),
+                trusted_root=restarted_store.trusted_root,
+                immutable=True,
+            )
+            authorization_module._atomic_write_private_json(
+                restarted.pending_path,
+                replacement.to_dict(),
+                trusted_root=restarted_store.trusted_root,
+            )
+            real_remove(request)
+
+        with mock.patch.object(
+            restarted,
+            "_remove_pending_if_matches_locked",
+            side_effect=replace_before_removing,
+        ):
+            recovered = restarted.request_change(
+                reason=orphan.reason,
+                summary="a valid replacement pending request",
+                proposed_goal=orphan.proposed_goal,
+                proposed_manifest_sha256="c" * 64,
+                proposed_release_target=orphan.proposed_release_target,
+                proposed_previous_release=orphan.proposed_previous_release,
+                expected_revision=state.revision,
+            )
+
+        assert replacement is not None
+        self.assertEqual(recovered, replacement)
+        self.assertEqual(restarted.pending(), replacement)
+        self.assertTrue(self._request_archive_path(orphan).is_file())
+        self.assertTrue(self._request_archive_path(replacement).is_file())
 
     def test_request_rejects_multiple_pending_changes(self) -> None:
         self._create_initial()

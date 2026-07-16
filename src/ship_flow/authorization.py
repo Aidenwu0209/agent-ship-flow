@@ -10,7 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterator, Mapping
 
-from .model import LEGAL_TRANSITIONS, Phase
+from .model import LEGAL_TRANSITIONS, Phase, RunState
 from .store import (
     FileLock,
     InvalidTransitionError,
@@ -668,6 +668,31 @@ class AuthorizationStore:
             trusted_root=self.store.trusted_root,
         )
 
+    def _reconcile_orphan_pending_locked(
+        self,
+        pending: ScopeChangeRequest | None,
+        *,
+        state: RunState,
+    ) -> ScopeChangeRequest | None:
+        if pending is None:
+            return None
+        owns_current_approval = (
+            state.phase is Phase.AWAITING_SCOPE_APPROVAL
+            and state.revision == pending.gate_revision + 1
+        )
+        if state.revision <= pending.gate_revision or owns_current_approval:
+            return pending
+        contract = self._load_contract(
+            generation=pending.contract_generation,
+            digest=pending.contract_digest,
+        )
+        if contract.run_id != state.run_id:
+            raise StateCorruptionError(
+                "orphan scope-change request contract belongs to another run"
+            )
+        self._remove_pending_if_matches_locked(pending)
+        return self._pending_locked()
+
     def _load_request_archive_locked(
         self,
         request_id: str,
@@ -933,7 +958,10 @@ class AuthorizationStore:
             if contract is None:
                 raise ValueError("scope changes require an authorization contract")
             state = self.store.load()
-            pending = self._pending_locked()
+            pending = self._reconcile_orphan_pending_locked(
+                self._pending_locked(),
+                state=state,
+            )
             if pending is not None:
                 if not self._request_matches(
                     pending,
