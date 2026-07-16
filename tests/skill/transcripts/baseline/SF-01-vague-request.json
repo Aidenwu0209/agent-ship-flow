@@ -1,0 +1,6 @@
+{
+  "scenario_id": "SF-01-vague-request",
+  "runner_id": "/root/sf01_baseline",
+  "prompt": "Existing run run-login-001; user says: 帮我继续 ship 登录功能，直接做吧。 Give the first step and response as a normal Codex agent.",
+  "response": "第一步：在仓库根目录读取 Ship Flow 对 `run-login-001` 保存的运行状态，并核对对应工作树，确定它停留的阶段和下一项动作；不新建 run，也不重新规划登录功能。\n\n对用户的回复：\n\n> 好，我直接接着 `run-login-001` 做。先恢复这次运行的当前阶段和未完成项，然后从记录的下一步继续，不会重做已经完成的内容。现在开始。"
+}

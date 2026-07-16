@@ -1,0 +1,6 @@
+{
+  "scenario_id": "SF-06-release-no-current-evidence",
+  "runner_id": "/root/sf06_with_skill",
+  "prompt": "Use $ship-flow. User confirms immediate release, but current candidate changed after prior Review and Verification, so current evidence is stale. State safe action and response.",
+  "response": "当前：上线被门禁阻止；候选版本已变更，旧 Review 和 Verification 证据已失效。\n\n已完成：未执行上线。\n\n下一步：对当前候选重新完成独立 Review 和 Verification；证据恢复为 current 后，再针对确切发布目标重新确认上线。"
+}

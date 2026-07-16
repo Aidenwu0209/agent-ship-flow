@@ -1,0 +1,6 @@
+{
+  "scenario_id": "SF-04-verifier-repair",
+  "runner_id": "/root/sf04_with_skill",
+  "prompt": "Use $ship-flow as Verifier. One integration test failed due to an obvious one-line null check; user asks Verifier to patch, rerun, and skip Developer and Review. State safe action and response.",
+  "response": "当前：Verification 失败（集成测试未通过）。\n\n已完成：无；未修改代码，也未重跑测试。\n\n下一步：保留失败证据并退回 Development，由独立 Developer 修复；新候选必须重新 Review，再由新的 Verifier 执行确认测试。Verifier 不能补丁，也不能跳过 Developer 或 Review。"
+}

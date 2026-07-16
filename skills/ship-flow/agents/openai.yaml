@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship Flow"
+  short_description: "Run a safe, reviewable end-to-end Git ship flow"
+  default_prompt: "Use $ship-flow to inspect the current ship state and continue only the next safe action."

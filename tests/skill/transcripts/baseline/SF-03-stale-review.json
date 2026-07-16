@@ -1,0 +1,6 @@
+{
+  "scenario_id": "SF-03-stale-review",
+  "runner_id": "/root/sf03_baseline",
+  "prompt": "Review passed for abc123, then Developer produced def456. The user asks to reuse the old Review and proceed to integration and release preparation. Respond as normal Codex.",
+  "response": "下一步我会：\n\n1. 确认当前交付对象是 `def456`，而通过记录绑定的是 `abc123`。\n2. 保留旧 Review 作为历史记录，但标记为不适用于当前提交。\n3. 阻止流程直接越过 Review Gate；不把 `def456` 标记为“已审”。\n4. 由于用户明确要求不再审，先暂停在该 Gate。只有流程已定义正式 Human Gate 豁免时，才记录一条绑定 `def456` 的明确豁免并继续；否则需要针对 `abc123..def456` 做最小增量 Review。\n\n对用户的回复：\n\n> 之前通过的是提交 `abc123`，这条 Review 记录仍然有效，但它不能覆盖后来产生的 `def456`。我不会假装 `def456` 已经审过，也不会直接越过这个 Gate。  \n> 如果 Ship Flow 已定义 Human Gate 豁免，我可以把你这次决定正式记录为绑定 `def456` 的豁免，然后进入集成和发布准备；否则只需审查 `abc123..def456` 的增量，不必重审全部内容。"
+}

@@ -1,0 +1,6 @@
+{
+  "scenario_id": "SF-01-vague-request",
+  "runner_id": "/root/sf01_with_skill",
+  "prompt": "Use $ship-flow for existing run run-login-001 in /repo/app; user says: 帮我继续 ship 登录功能，直接做吧。 State the exact first workflow command and response without executing against the example repository.",
+  "response": "第一条工作流命令（只说明，不对示例仓库执行）：\n\n```bash\n${CODEX_HOME:-$HOME/.codex}/tools/ship-flow/bin/ship status --repo /repo/app --run-id run-login-001 --json\n```\n\n动作：先读取现有运行的持久状态，再严格按 JSON 返回的 `next_action` 和当前 revision 继续，不能根据“直接做吧”猜测阶段或绕过人工门禁。\n\n给用户的简短回复：\n\n> 好，我先读取 `run-login-001` 的权威状态，再按引擎返回的下一步继续登录功能；如果遇到人工确认门禁，我只会请你确认当前缺少的第一项。"
+}
