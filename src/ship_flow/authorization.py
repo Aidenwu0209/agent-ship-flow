@@ -371,6 +371,7 @@ class AuthorizationStore:
         self.store = store
         self.authorization_directory = store.run_directory / "authorization"
         self.contracts_directory = self.authorization_directory / "contracts"
+        self.requests_directory = self.authorization_directory / "requests"
         self.resolutions_directory = self.authorization_directory / "resolutions"
         self.current_path = self.authorization_directory / "current.json"
         self.pending_path = self.authorization_directory / "pending-scope-change.json"
@@ -427,6 +428,39 @@ class AuthorizationStore:
         if contract.generation != generation or contract.digest() != digest:
             raise StateCorruptionError("authorization contract pointer is invalid")
         return contract
+
+    def _contracts_for_generation_locked(
+        self,
+        generation: int,
+    ) -> tuple[AuthorizationContract, ...]:
+        try:
+            names = _private_directory_names(
+                self.contracts_directory,
+                trusted_root=self.store.trusted_root,
+            )
+        except StateNotFoundError:
+            return ()
+        contracts: list[AuthorizationContract] = []
+        for name in names:
+            match = re.fullmatch(r"([0-9]{4,})-([0-9a-f]{64})\.json", name)
+            if match is None or match.group(1) != f"{int(match.group(1)):04d}":
+                raise StateCorruptionError(
+                    "authorization contracts directory has unknown files"
+                )
+            file_generation = int(match.group(1))
+            if file_generation != generation:
+                continue
+            contracts.append(
+                self._load_contract(
+                    generation=file_generation,
+                    digest=match.group(2),
+                )
+            )
+        if len(contracts) > 1:
+            raise StateCorruptionError(
+                "authorization generation has conflicting immutable records"
+            )
+        return tuple(contracts)
 
     def _current_locked(self) -> AuthorizationContract | None:
         pointer = self._read_json(
@@ -526,19 +560,24 @@ class AuthorizationStore:
         }
         with self._locked():
             existing = self._current_locked()
+            prepared = self._contracts_for_generation_locked(1)
+            if existing is not None and prepared != (existing,):
+                raise StateCorruptionError(
+                    "initial authorization generation conflicts with current pointer"
+                )
+            expected = {
+                "generation": 1,
+                "mode": normalized["mode"],
+                "goal": normalized["goal"],
+                "repository": normalized["repository"],
+                "worktree": normalized["worktree"],
+                "branch": normalized["branch"],
+                "manifest_sha256": normalized["manifest_sha256"],
+                "release_target": normalized["release_target"],
+                "previous_release": normalized["previous_release"],
+                "state_revision": normalized["state_revision"],
+            }
             if existing is not None:
-                expected = {
-                    "generation": 1,
-                    "mode": normalized["mode"],
-                    "goal": normalized["goal"],
-                    "repository": normalized["repository"],
-                    "worktree": normalized["worktree"],
-                    "branch": normalized["branch"],
-                    "manifest_sha256": normalized["manifest_sha256"],
-                    "release_target": normalized["release_target"],
-                    "previous_release": normalized["previous_release"],
-                    "state_revision": normalized["state_revision"],
-                }
                 if all(
                     getattr(existing, key) == value for key, value in expected.items()
                 ):
@@ -549,6 +588,16 @@ class AuthorizationStore:
                 raise StaleRevisionError(
                     f"expected revision {state_revision}, found {state.revision}"
                 )
+            if prepared:
+                contract = prepared[0]
+                if contract.run_id != state.run_id or not all(
+                    getattr(contract, key) == value for key, value in expected.items()
+                ):
+                    raise StateCorruptionError(
+                        "prepared initial authorization contract conflicts"
+                    )
+                self._write_current(contract)
+                return contract
             contract = AuthorizationContract(
                 run_id=state.run_id,
                 generation=1,
@@ -593,7 +642,49 @@ class AuthorizationStore:
             raise StateCorruptionError(
                 "pending scope-change request belongs to another run"
             )
+        if self._load_request_archive_locked(request.request_id) != request:
+            raise StateCorruptionError(
+                "pending scope-change request differs from immutable archive"
+            )
         return request
+
+    def _load_request_archive_locked(
+        self,
+        request_id: str,
+    ) -> ScopeChangeRequest:
+        request_id = _require_sha256(request_id, label="request_id")
+        payload = self._read_json(
+            self.requests_directory / f"{request_id}.json",
+            label="scope-change request archive",
+        )
+        assert payload is not None
+        try:
+            request = ScopeChangeRequest.from_dict(payload)
+        except (TypeError, ValueError) as error:
+            raise StateCorruptionError(
+                "scope-change request archive is invalid"
+            ) from error
+        if request.request_id != request_id:
+            raise StateCorruptionError(
+                "scope-change request archive filename is invalid"
+            )
+        return request
+
+    def _write_request_archive(self, request: ScopeChangeRequest) -> None:
+        path = self.requests_directory / f"{request.request_id}.json"
+        try:
+            _atomic_write_private_json(
+                path,
+                request.to_dict(),
+                trusted_root=self.store.trusted_root,
+                immutable=True,
+            )
+        except FileExistsError:
+            existing = self._load_request_archive_locked(request.request_id)
+            if existing != request:
+                raise StateCorruptionError(
+                    "immutable scope-change request archive conflicts"
+                ) from None
 
     def pending(self) -> ScopeChangeRequest | None:
         with self._locked():
@@ -607,6 +698,7 @@ class AuthorizationStore:
             )
         except StateNotFoundError:
             return ()
+        run_id = self.store.load().run_id
         resolutions: list[ScopeChangeResolution] = []
         for name in names:
             match = re.fullmatch(r"([0-9a-f]{64})-([0-9a-f]{64})\.json", name)
@@ -631,8 +723,57 @@ class AuthorizationStore:
                 raise StateCorruptionError(
                     "scope-change resolution filename is invalid"
                 )
+            self._validate_resolution_audit_locked(
+                resolution,
+                run_id=run_id,
+            )
             resolutions.append(resolution)
         return tuple(resolutions)
+
+    def _validate_resolution_audit_locked(
+        self,
+        resolution: ScopeChangeResolution,
+        *,
+        run_id: str,
+    ) -> None:
+        if resolution.run_id != run_id:
+            raise StateCorruptionError("scope-change resolution belongs to another run")
+        request = self._load_request_archive_locked(resolution.request_id)
+        if request.run_id != run_id:
+            raise StateCorruptionError(
+                "scope-change resolution request belongs to another run"
+            )
+        previous = self._load_contract(
+            generation=request.contract_generation,
+            digest=request.contract_digest,
+        )
+        if (
+            previous.run_id != run_id
+            or resolution.previous_contract_digest != previous.digest()
+            or resolution.gate_revision != request.gate_revision + 1
+        ):
+            raise StateCorruptionError(
+                "scope-change resolution has invalid request or contract binding"
+            )
+        if resolution.decision == "reject":
+            if resolution.resulting_contract_digest != previous.digest():
+                raise StateCorruptionError(
+                    "rejected scope change has invalid resulting contract"
+                )
+            return
+        resulting = self._load_contract(
+            generation=previous.generation + 1,
+            digest=resolution.resulting_contract_digest,
+        )
+        if not self._contract_matches_request(
+            resulting,
+            previous,
+            request,
+            resolution.gate_revision,
+        ):
+            raise StateCorruptionError(
+                "approved scope change has invalid resulting contract"
+            )
 
     def latest_resolution(self) -> ScopeChangeResolution | None:
         with self._locked():
@@ -769,6 +910,7 @@ class AuthorizationStore:
                 requested_at=requested_at,
                 gate_revision=expected_revision,
             )
+            self._write_request_archive(request)
             _atomic_write_private_json(
                 self.pending_path,
                 request.to_dict(),
@@ -783,14 +925,22 @@ class AuthorizationStore:
     @staticmethod
     def _contract_matches_request(
         contract: AuthorizationContract,
+        previous: AuthorizationContract,
         request: ScopeChangeRequest,
+        expected_revision: int,
     ) -> bool:
         return (
-            contract.generation == request.contract_generation + 1
+            contract.run_id == previous.run_id
+            and contract.generation == request.contract_generation + 1
+            and contract.mode is previous.mode
+            and contract.repository == previous.repository
+            and contract.worktree == previous.worktree
+            and contract.branch == previous.branch
             and contract.goal == request.proposed_goal
             and contract.manifest_sha256 == request.proposed_manifest_sha256
             and contract.release_target == request.proposed_release_target
             and contract.previous_release == request.proposed_previous_release
+            and contract.state_revision == expected_revision
         )
 
     def _resolution_for_request_locked(
@@ -905,23 +1055,49 @@ class AuthorizationStore:
                 raise ValueError("run is not awaiting scope approval")
             if decision == "approve":
                 if current.digest() == previous.digest():
-                    resulting = AuthorizationContract(
-                        run_id=previous.run_id,
-                        generation=previous.generation + 1,
-                        mode=previous.mode,
-                        goal=request.proposed_goal,
-                        repository=previous.repository,
-                        worktree=previous.worktree,
-                        branch=previous.branch,
-                        manifest_sha256=request.proposed_manifest_sha256,
-                        release_target=request.proposed_release_target,
-                        previous_release=request.proposed_previous_release,
-                        state_revision=expected_revision,
-                        created_at=_utc_now(),
+                    prepared = self._contracts_for_generation_locked(
+                        previous.generation + 1
                     )
-                    self._write_contract(resulting)
+                    if prepared:
+                        resulting = prepared[0]
+                        if not self._contract_matches_request(
+                            resulting,
+                            previous,
+                            request,
+                            expected_revision,
+                        ):
+                            raise StateCorruptionError(
+                                "prepared authorization expansion conflicts"
+                            )
+                    else:
+                        resulting = AuthorizationContract(
+                            run_id=previous.run_id,
+                            generation=previous.generation + 1,
+                            mode=previous.mode,
+                            goal=request.proposed_goal,
+                            repository=previous.repository,
+                            worktree=previous.worktree,
+                            branch=previous.branch,
+                            manifest_sha256=request.proposed_manifest_sha256,
+                            release_target=request.proposed_release_target,
+                            previous_release=request.proposed_previous_release,
+                            state_revision=expected_revision,
+                            created_at=_utc_now(),
+                        )
+                        self._write_contract(resulting)
                     self._write_current(resulting)
-                elif self._contract_matches_request(current, request):
+                elif self._contract_matches_request(
+                    current,
+                    previous,
+                    request,
+                    expected_revision,
+                ):
+                    if self._contracts_for_generation_locked(current.generation) != (
+                        current,
+                    ):
+                        raise StateCorruptionError(
+                            "current authorization expansion conflicts"
+                        )
                     resulting = current
                 else:
                     raise StateCorruptionError(

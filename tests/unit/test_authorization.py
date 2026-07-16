@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from ship_flow.authorization import (
     AuthorizationContract,
@@ -61,6 +64,27 @@ class AuthorizationStoreTests(unittest.TestCase):
         arguments.update(overrides)
         return self.authorizations.request_change(**arguments)  # type: ignore[arg-type]
 
+    def _contract_files(self, generation: int) -> list[Path]:
+        return sorted(
+            (self.run_directory / "authorization" / "contracts").glob(
+                f"{generation:04d}-*.json"
+            )
+        )
+
+    @staticmethod
+    def _contract_from_path(path: Path) -> AuthorizationContract:
+        return AuthorizationContract.from_dict(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+
+    def _request_archive_path(self, request: ScopeChangeRequest) -> Path:
+        return (
+            self.run_directory
+            / "authorization"
+            / "requests"
+            / f"{request.request_id}.json"
+        )
+
     def test_missing_contract_uses_strict_compatibility_mode(self) -> None:
         self.assertIsNone(self.authorizations.current())
         self.assertEqual(self.authorizations.mode(), ExecutionMode.STRICT)
@@ -107,6 +131,55 @@ class AuthorizationStoreTests(unittest.TestCase):
             self._create_initial(goal="ship a broader repository change")
 
         self.assertEqual(self.authorizations.current(), first)
+
+    def test_create_initial_recovers_prepared_generation_before_pointer(self) -> None:
+        with mock.patch.object(
+            self.authorizations,
+            "_write_current",
+            side_effect=OSError("simulated crash before current pointer"),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated crash"):
+                self._create_initial()
+
+        prepared_files = self._contract_files(1)
+        self.assertEqual(len(prepared_files), 1)
+        prepared = self._contract_from_path(prepared_files[0])
+
+        recovered = self._create_initial()
+
+        self.assertEqual(recovered, prepared)
+        self.assertEqual(self._contract_files(1), prepared_files)
+        self.assertEqual(self.authorizations.current(), prepared)
+
+    def test_create_initial_rejects_conflicting_prepared_generation(self) -> None:
+        with mock.patch.object(
+            self.authorizations,
+            "_write_current",
+            side_effect=OSError("simulated crash before current pointer"),
+        ):
+            with self.assertRaises(OSError):
+                self._create_initial()
+        prepared = self._contract_from_path(self._contract_files(1)[0])
+        conflicting = replace(prepared, created_at="2099-01-01T00:00:00.000000Z")
+        conflict_path = (
+            self.run_directory
+            / "authorization"
+            / "contracts"
+            / f"0001-{conflicting.digest()}.json"
+        )
+        conflict_path.write_text(
+            json.dumps(
+                conflicting.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        conflict_path.chmod(0o600)
+
+        with self.assertRaises(StateCorruptionError):
+            self._create_initial()
 
     def test_symlinked_authorization_directory_is_rejected(self) -> None:
         outside = self.root / "outside-authorization"
@@ -161,6 +234,37 @@ class AuthorizationStoreTests(unittest.TestCase):
         self.assertTrue(resolution_path.is_file())
         self.assertEqual(stat.S_IMODE(resolution_path.stat().st_mode), 0o600)
 
+    def test_approval_recovers_prepared_generation_before_pointer(self) -> None:
+        initial = self._create_initial()
+        self._request_change()
+        awaiting_revision = self.store.load().revision
+        with mock.patch.object(
+            self.authorizations,
+            "_write_current",
+            side_effect=OSError("simulated crash before current pointer"),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated crash"):
+                self.authorizations.resolve_change(
+                    decision="approve",
+                    actor="human-owner",
+                    expected_revision=awaiting_revision,
+                )
+
+        prepared_files = self._contract_files(2)
+        self.assertEqual(len(prepared_files), 1)
+        prepared = self._contract_from_path(prepared_files[0])
+        self.assertEqual(self.authorizations.current(), initial)
+
+        recovered = self.authorizations.resolve_change(
+            decision="approve",
+            actor="human-owner",
+            expected_revision=awaiting_revision,
+        )
+
+        self.assertEqual(recovered, prepared)
+        self.assertEqual(self._contract_files(2), prepared_files)
+        self.assertEqual(self.authorizations.current(), prepared)
+
     def test_reject_scope_change_retains_initial_generation(self) -> None:
         contract = self._create_initial()
         self._request_change(proposed_goal="ship an expanded goal")
@@ -183,6 +287,49 @@ class AuthorizationStoreTests(unittest.TestCase):
             resolution.resulting_contract_digest,
             contract.digest(),
         )
+
+    def test_resolved_request_is_retained_in_private_immutable_archive(self) -> None:
+        self._create_initial()
+        request = self._request_change(proposed_goal="ship an expanded goal")
+        archive_path = self._request_archive_path(request)
+
+        self.assertTrue(archive_path.is_file())
+        self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
+        self.authorizations.resolve_change(
+            decision="reject",
+            actor="human-owner",
+            expected_revision=self.store.load().revision,
+        )
+
+        self.assertTrue(archive_path.is_file())
+        self.assertEqual(
+            ScopeChangeRequest.from_dict(
+                json.loads(archive_path.read_text(encoding="utf-8"))
+            ),
+            request,
+        )
+
+    def test_resolution_rejects_request_archive_changed_after_pending_write(
+        self,
+    ) -> None:
+        self._create_initial()
+        request = self._request_change()
+        archive_path = self._request_archive_path(request)
+        archive_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        changed = request.to_dict()
+        changed["summary"] = "changed after pending publication"
+        archive_path.write_text(
+            json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        archive_path.chmod(0o600)
+
+        with self.assertRaises(StateCorruptionError):
+            self.authorizations.resolve_change(
+                decision="approve",
+                actor="human-owner",
+                expected_revision=self.store.load().revision,
+            )
 
     def test_request_rejects_stale_revision_without_creating_pending_state(
         self,
@@ -255,6 +402,85 @@ class AuthorizationStoreTests(unittest.TestCase):
 
         self.assertEqual(self.authorizations.pending(), request)
         self.assertEqual(self.store.load(), awaiting)
+
+    def test_latest_resolution_rejects_a_foreign_run_record(self) -> None:
+        self._create_initial()
+        other_run_directory = self.root / "runs" / "run-other"
+        other_repository = self.root / "repository-other"
+        other_worktree = self.root / "worktree-other"
+        other_repository.mkdir()
+        other_worktree.mkdir()
+        other_store = StateStore(other_run_directory)
+        other_state = other_store.create("run-other")
+        other_authorizations = AuthorizationStore(other_store)
+        other_authorizations.create_initial(
+            mode=ExecutionMode.AUTONOMOUS,
+            goal="ship another run",
+            repository=other_repository,
+            worktree=other_worktree,
+            branch="feat/other",
+            manifest_sha256="c" * 64,
+            release_target=None,
+            previous_release=None,
+            state_revision=other_state.revision,
+        )
+        other_contract = other_authorizations.current()
+        assert other_contract is not None
+        other_request = other_authorizations.request_change(
+            reason="goal_expansion",
+            summary="expand another run",
+            proposed_goal="ship another expanded run",
+            proposed_manifest_sha256=other_contract.manifest_sha256,
+            proposed_release_target=None,
+            proposed_previous_release=None,
+            expected_revision=other_store.load().revision,
+        )
+        other_authorizations.resolve_change(
+            decision="reject",
+            actor="other-owner",
+            expected_revision=other_store.load().revision,
+        )
+        other_resolution = other_authorizations.latest_resolution()
+        assert other_resolution is not None
+        source = (
+            other_run_directory
+            / "authorization"
+            / "resolutions"
+            / f"{other_request.request_id}-{other_resolution.resolution_id}.json"
+        )
+        target_directory = self.run_directory / "authorization" / "resolutions"
+        target_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(source, target_directory / source.name)
+
+        with self.assertRaises(StateCorruptionError):
+            self.authorizations.latest_resolution()
+
+    def test_latest_resolution_requires_its_archived_request(self) -> None:
+        self._create_initial()
+        request = self._request_change()
+        self.authorizations.resolve_change(
+            decision="reject",
+            actor="human-owner",
+            expected_revision=self.store.load().revision,
+        )
+        self._request_archive_path(request).unlink()
+
+        with self.assertRaises(StateCorruptionError):
+            self.authorizations.latest_resolution()
+
+    def test_latest_resolution_requires_its_referenced_contract(self) -> None:
+        contract = self._create_initial()
+        self._request_change()
+        self.authorizations.resolve_change(
+            decision="reject",
+            actor="human-owner",
+            expected_revision=self.store.load().revision,
+        )
+        contract_path = self._contract_files(contract.generation)[0]
+        contract_path.unlink()
+
+        with self.assertRaises(StateCorruptionError):
+            self.authorizations.latest_resolution()
 
 
 if __name__ == "__main__":
