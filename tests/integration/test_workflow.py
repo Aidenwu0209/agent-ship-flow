@@ -1225,6 +1225,28 @@ class WorkflowIntegrationTests(unittest.TestCase):
             planned.ownership.last_known_oid,
         )
 
+    def test_cleanup_refuses_dirty_owned_worktree_without_mutation(self) -> None:
+        planned = self.plan(self.start("cleanup-dirty"))
+        gate = self.advance_to_cleanup(planned)
+        dirty = planned.ownership.worktree_path / "untracked.txt"
+        dirty.write_text("preserve me\n", encoding="utf-8")
+
+        with self.assertRaises(CleanupRefusedError) as refused:
+            cleanup_run(
+                self.repository,
+                planned.state.run_id,
+                expected_revision=gate.revision,
+                approved=True,
+            )
+
+        self.assertIn("dirty", refused.exception.conditions)
+        self.assertEqual(planned.store.load(), gate)
+        self.assertEqual(dirty.read_text(encoding="utf-8"), "preserve me\n")
+        self.assertTrue(planned.ownership.record_path.is_file())
+        self.assertFalse(
+            (planned.run_directory / "cleanup-workflow-operation.json").exists()
+        )
+
     def test_cleanup_recovery_rejects_ownership_drift_before_completed(
         self,
     ) -> None:

@@ -917,6 +917,152 @@ def _record_review_command(
     )
 
 
+def _require_autonomous_contract(store: StateStore) -> AuthorizationContract:
+    contract = _current_authorization(store)
+    if contract is None or contract.mode is not ExecutionMode.AUTONOMOUS:
+        raise CliFailure(
+            "authorization_required",
+            "当前运行未启用合约自动授权。",
+            4,
+        )
+    return contract
+
+
+def _handle_authorize(args: argparse.Namespace) -> dict[str, object]:
+    repository = _repository(args.repo)
+    if args.gate == "plan":
+        run, _, store = _preflight(
+            repository,
+            args.run_id,
+            args.expected_revision,
+            (Phase.AWAITING_PLAN_APPROVAL,),
+        )
+        contract = _require_autonomous_contract(store)
+        record = record_plan_approval(
+            store,
+            current_subject=_subject_for(run),
+            approver_actor=f"scope-contract:{contract.digest()}",
+        )
+        state = store.load()
+        return _success(
+            "authorize",
+            gate="plan",
+            authorization_source="contract",
+            approval_id=record.approval_id,
+            state=_state_payload(state),
+            next_action=_policy_aware_state_action(store, state),
+            evidence={
+                "approval": str(
+                    store.run_directory
+                    / "approvals"
+                    / "plan"
+                    / f"{record.approval_id}.json"
+                )
+            },
+        )
+    if args.gate == "release":
+        run, ownership, store = _preflight(
+            repository,
+            args.run_id,
+            args.expected_revision,
+            (Phase.AWAITING_RELEASE_APPROVAL,),
+        )
+        contract = _require_autonomous_contract(store)
+        if contract.release_target is None:
+            raise CliFailure(
+                "invalid_input",
+                "当前授权合约未声明发布目标。",
+                5,
+            )
+        record = _release_engine(run, ownership).record_approval(
+            gate="release",
+            target=contract.release_target,
+            approver_actor=f"scope-contract:{contract.digest()}",
+            expires_at=_utc_after(),
+            allow_default_expiry_recovery=True,
+        )
+        state = store.load()
+        return _success(
+            "authorize",
+            gate="release",
+            authorization_source="contract",
+            approval_id=record.approval_id,
+            target=record.target,
+            state=_state_payload(state),
+            next_action={
+                "phase": state.phase.value,
+                "kind": "automatic",
+                "action": "release",
+                "approval_id": record.approval_id,
+                "target": record.target,
+            },
+            evidence={
+                "approval": str(
+                    store.run_directory / "approvals" / f"{record.approval_id}.json"
+                )
+            },
+        )
+    run, ownership, store = _preflight(
+        repository,
+        args.run_id,
+        args.expected_revision,
+        (Phase.ROLLBACK_PENDING,),
+    )
+    contract = _require_autonomous_contract(store)
+    if contract.release_target is None:
+        raise CliFailure(
+            "invalid_input",
+            "当前授权合约未声明回滚目标。",
+            5,
+        )
+    if contract.previous_release is None:
+        raise CliFailure(
+            "invalid_input",
+            "当前授权合约未声明上一发布版本。",
+            5,
+        )
+    engine = _release_engine(run, ownership)
+    failed_context = engine.inspect_failed_release_context()
+    if failed_context.target != contract.release_target:
+        raise CliFailure(
+            "scope_mismatch",
+            "失败发布目标超出当前授权合约。",
+            4,
+        )
+    record = engine.record_approval(
+        gate="rollback",
+        target=contract.release_target,
+        approver_actor=f"scope-contract:{contract.digest()}",
+        expires_at=_utc_after(),
+        failed_release_id=failed_context.approval_id,
+        previous_release=contract.previous_release,
+        allow_default_expiry_recovery=True,
+    )
+    state = store.load()
+    return _success(
+        "authorize",
+        gate="rollback",
+        authorization_source="contract",
+        approval_id=record.approval_id,
+        target=record.target,
+        state=_state_payload(state),
+        next_action={
+            "phase": state.phase.value,
+            "kind": "automatic",
+            "action": "rollback",
+            "approval_id": record.approval_id,
+            "target": record.target,
+            "failed_release_id": failed_context.approval_id,
+            "previous_release": contract.previous_release,
+        },
+        evidence={
+            "approval": str(
+                store.run_directory / "approvals" / f"{record.approval_id}.json"
+            )
+        },
+    )
+
+
 def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
     repository = _repository(args.repo)
     if args.gate == "plan":
@@ -1317,7 +1463,9 @@ def _handle_cleanup(args: argparse.Namespace) -> dict[str, object]:
         (Phase.AWAITING_CLEANUP_APPROVAL,),
     )
     if not args.approve:
-        raise CliFailure("confirmation_required", "清理需要人工确认。", 4)
+        contract = _current_authorization(store)
+        if contract is None or contract.mode is not ExecutionMode.AUTONOMOUS:
+            raise CliFailure("confirmation_required", "清理需要人工确认。", 4)
     completed = cleanup_run(
         repository,
         args.run_id,
@@ -1500,6 +1648,13 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--failed-release-id")
     command.add_argument("--previous-release")
     command.set_defaults(handler=_handle_approve)
+
+    command = commands.add_parser("authorize")
+    _mutation(command)
+    command.add_argument(
+        "--gate", choices=("plan", "release", "rollback"), required=True
+    )
+    command.set_defaults(handler=_handle_authorize)
 
     command = commands.add_parser("development-ready")
     _mutation(command)

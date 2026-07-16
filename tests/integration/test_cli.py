@@ -32,7 +32,7 @@ from ship_flow.reconcile import (
     Reconciler,
     record_plan_approval,
 )
-from ship_flow.release import ReleaseEngine
+from ship_flow.release import ApprovalRecord, ReleaseEngine
 from ship_flow.review import (
     ReviewRole,
     issue_handoff,
@@ -473,6 +473,37 @@ class BeginnerCliFlowTests(unittest.TestCase):
         )
         self.assertFalse(self.sentinel.exists())
 
+        cleanup_revision = int(self.state(synced)["revision"])
+        unmerged = self.cli(
+            "cleanup",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(cleanup_revision),
+        )
+        self.assertEqual(unmerged.returncode, 4)
+        self.assertEqual(
+            json.loads(unmerged.stdout)["error"]["code"],
+            "cleanup_refused",
+        )
+        self.assertTrue(self.worktree.is_dir())
+
+        cleaned = self.success(
+            "cleanup",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(cleanup_revision),
+            "--approved-condition",
+            "unmerged",
+        )
+        self.assertEqual(self.state(cleaned)["phase"], "COMPLETED")
+        self.assertFalse(os.path.lexists(self.worktree))
+
     def test_immediate_plan_review_response_uses_selected_mode_policy(self) -> None:
         _, _, autonomous = self.start_awaiting_plan_approval()
         self.assertEqual(
@@ -483,6 +514,148 @@ class BeginnerCliFlowTests(unittest.TestCase):
                 "action": "authorize_plan",
                 "authorization_source": "contract",
             },
+        )
+
+    def test_autonomous_plan_authorization_uses_contract_actor_without_actor_option(
+        self,
+    ) -> None:
+        started, revision, reviewed = self.start_awaiting_plan_approval()
+        self.assertEqual(
+            reviewed["next_action"],
+            {
+                "phase": "AWAITING_PLAN_APPROVAL",
+                "kind": "automatic",
+                "action": "authorize_plan",
+                "authorization_source": "contract",
+            },
+        )
+
+        actor_attempt = self.cli(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+            "--actor",
+            "human-owner",
+        )
+        self.assertEqual(actor_attempt.returncode, 2)
+        self.assertEqual(
+            json.loads(actor_attempt.stdout)["error"]["code"],
+            "usage_error",
+        )
+
+        authorized = self.success(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+        )
+
+        self.assertEqual(self.state(authorized)["phase"], "DEVELOPING")
+        self.assertEqual(authorized["authorization_source"], "contract")
+        approval_path = Path(str(authorized["evidence"]["approval"]))  # type: ignore[index]
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            approval["approver_actor"],
+            f"scope-contract:{started['authorization']['digest']}",  # type: ignore[index]
+        )
+
+    def test_plan_authorization_rejects_strict_contract(self) -> None:
+        _, revision, _ = self.start_awaiting_plan_approval(mode="strict")
+
+        denied = self.cli(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+        )
+
+        self.assertEqual(denied.returncode, 4)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "authorization_required",
+        )
+
+    def test_plan_authorization_rejects_legacy_run_without_contract(self) -> None:
+        write_manifest(
+            self.primary / ".ship" / "manifest.toml",
+            Manifest(
+                project_name="legacy-authorize-fixture",
+                base_branch="main",
+                remote="origin",
+                verification_steps=(
+                    CommandSpec(
+                        "unit",
+                        (sys.executable, "-c", "pass"),
+                        "unit",
+                    ),
+                ),
+                release_required=False,
+            ),
+        )
+        git(self.primary, "add", ".ship/manifest.toml")
+        git(self.primary, "commit", "-m", "confirm legacy authorization manifest")
+        repository = GitRepository.discover(self.primary)
+        started = start_run(
+            repository,
+            run_id=self.run_id,
+            branch="ship/legacy-authorize-cli-001",
+            worktree_path=self.worktree,
+        )
+        planned = set_plan(
+            repository,
+            self.run_id,
+            "# Plan\n\nImplement and independently verify the requested change.\n",
+            expected_revision=started.state.revision,
+        )
+        assert planned.subject is not None
+        nonce = issue_handoff(
+            planned.store,
+            subject=planned.subject,
+            source_actor="planner-context",
+            role=ReviewRole.PLAN_CRITIC,
+        )
+        record_plan_review(
+            planned.store,
+            current_subject=planned.subject,
+            reviewer_actor="plan-critic-context",
+            handoff_nonce=nonce,
+            verdict="pass",
+            findings=(),
+        )
+        revision = planned.store.load().revision
+
+        denied = self.cli(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+        )
+
+        self.assertEqual(denied.returncode, 4)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "authorization_required",
         )
 
     def test_immediate_strict_plan_review_response_keeps_human_gate(self) -> None:
@@ -1356,7 +1529,7 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             variables=self.variables,
         )
 
-    def cli(self, command: str) -> subprocess.CompletedProcess[str]:
+    def cli(self, command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         source_root = Path(__file__).resolve().parents[2] / "src"
         environment["PYTHONPATH"] = str(source_root)
@@ -1370,6 +1543,7 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
                 str(self.primary),
                 "--run-id",
                 self.run_id,
+                *arguments,
                 "--json",
             ),
             cwd=self.primary,
@@ -1388,7 +1562,13 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             if path.is_file()
         }
 
-    def select_mode(self, mode: ExecutionMode) -> None:
+    def select_mode(
+        self,
+        mode: ExecutionMode,
+        *,
+        release_target: str | None = "production",
+        previous_release: str | None = "release-v1",
+    ) -> None:
         AuthorizationStore(self.store).create_initial(
             mode=mode,
             goal="ship approval-aware fixture",
@@ -1396,10 +1576,263 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             worktree=self.ownership.worktree_path,
             branch=self.ownership.branch,
             manifest_sha256=manifest_digest(self.manifest),
-            release_target="production",
-            previous_release="release-v1",
+            release_target=release_target,
+            previous_release=previous_release,
             state_revision=self.store.load().revision,
         )
+
+    def test_autonomous_release_authorization_uses_contract_target_and_actor(
+        self,
+    ) -> None:
+        self.select_mode(ExecutionMode.AUTONOMOUS)
+        contract = AuthorizationStore(self.store).current()
+        assert contract is not None
+
+        status = self.cli("status")
+        self.assertEqual(status.returncode, 0, msg=status.stdout)
+        self.assertEqual(
+            json.loads(status.stdout)["next_action"],
+            {
+                "phase": "AWAITING_RELEASE_APPROVAL",
+                "kind": "automatic",
+                "action": "authorize_release",
+                "authorization_source": "contract",
+            },
+        )
+        authorized = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "release",
+        )
+
+        self.assertEqual(
+            authorized.returncode,
+            0,
+            msg=f"stdout={authorized.stdout!r}\nstderr={authorized.stderr!r}",
+        )
+        payload = json.loads(authorized.stdout)
+        self.assertEqual(payload["authorization_source"], "contract")
+        self.assertEqual(payload["target"], "production")
+        self.assertEqual(
+            payload["next_action"],
+            {
+                "phase": "AWAITING_RELEASE_APPROVAL",
+                "kind": "automatic",
+                "action": "release",
+                "approval_id": payload["approval_id"],
+                "target": "production",
+            },
+        )
+        approval = json.loads(
+            Path(str(payload["evidence"]["approval"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            approval["approver_actor"],
+            f"scope-contract:{contract.digest()}",
+        )
+        self.assertFalse(self.release_sentinel.exists())
+
+    def test_release_authorization_requires_contract_target(self) -> None:
+        self.select_mode(ExecutionMode.AUTONOMOUS, release_target=None)
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "release",
+        )
+
+        self.assertEqual(denied.returncode, 5)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "invalid_input",
+        )
+        self.assertFalse(self.release_sentinel.exists())
+
+    def fail_release_for_contract(
+        self,
+        *,
+        release_target: str | None = "production",
+        previous_release: str | None = "release-v1",
+    ) -> ApprovalRecord:
+        self.select_mode(
+            ExecutionMode.AUTONOMOUS,
+            release_target=release_target,
+            previous_release=previous_release,
+        )
+        release_approval = self.engine.record_approval(
+            gate="release",
+            target="production",
+            approver_actor="release-owner",
+            expires_at="2999-01-01T00:00:00Z",
+        )
+        self.engine.release(
+            target="production",
+            approval_id=release_approval.approval_id,
+            previous_release="release-v1",
+        )
+        self.assertEqual(self.store.load().phase, Phase.ROLLBACK_PENDING)
+        return release_approval
+
+    def test_autonomous_rollback_authorization_uses_sealed_failed_context(
+        self,
+    ) -> None:
+        release_approval = self.fail_release_for_contract()
+        contract = AuthorizationStore(self.store).current()
+        assert contract is not None
+        status = self.cli("status")
+        self.assertEqual(status.returncode, 0, msg=status.stdout)
+        self.assertEqual(
+            json.loads(status.stdout)["next_action"],
+            {
+                "phase": "ROLLBACK_PENDING",
+                "kind": "automatic",
+                "action": "authorize_rollback",
+                "authorization_source": "contract",
+            },
+        )
+
+        authorized = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "rollback",
+        )
+
+        self.assertEqual(
+            authorized.returncode,
+            0,
+            msg=f"stdout={authorized.stdout!r}\nstderr={authorized.stderr!r}",
+        )
+        payload = json.loads(authorized.stdout)
+        self.assertEqual(payload["authorization_source"], "contract")
+        self.assertEqual(
+            payload["next_action"],
+            {
+                "phase": "ROLLBACK_PENDING",
+                "kind": "automatic",
+                "action": "rollback",
+                "approval_id": payload["approval_id"],
+                "target": "production",
+                "failed_release_id": release_approval.approval_id,
+                "previous_release": "release-v1",
+            },
+        )
+        approval = json.loads(
+            Path(str(payload["evidence"]["approval"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            approval["approver_actor"],
+            f"scope-contract:{contract.digest()}",
+        )
+        self.assertEqual(approval["failed_release_id"], release_approval.approval_id)
+        self.assertFalse(self.rollback_sentinel.exists())
+
+    def test_rollback_authorization_rejects_contract_target_mismatch(self) -> None:
+        self.fail_release_for_contract(release_target="staging")
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "rollback",
+        )
+
+        self.assertEqual(denied.returncode, 4)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "scope_mismatch",
+        )
+        self.assertFalse(self.rollback_sentinel.exists())
+
+    def test_rollback_authorization_requires_previous_release(self) -> None:
+        self.fail_release_for_contract(previous_release=None)
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "rollback",
+        )
+
+        self.assertEqual(denied.returncode, 5)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "invalid_input",
+        )
+        self.assertFalse(self.rollback_sentinel.exists())
+
+    def test_rollback_authorization_rejects_stale_contract_generation(self) -> None:
+        self.fail_release_for_contract()
+        authorizations = AuthorizationStore(self.store)
+        stale_revision = self.store.load().revision
+        contract = authorizations.current()
+        assert contract is not None
+        authorizations.request_change(
+            reason="rollback_scope_change",
+            summary="change rollback authorization generation",
+            proposed_goal=contract.goal,
+            proposed_manifest_sha256=contract.manifest_sha256,
+            proposed_release_target=contract.release_target,
+            proposed_previous_release=contract.previous_release,
+            expected_revision=stale_revision,
+        )
+        authorizations.resolve_change(
+            decision="approve",
+            actor="human-owner",
+            expected_revision=self.store.load().revision,
+        )
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(stale_revision),
+            "--gate",
+            "rollback",
+        )
+
+        self.assertEqual(denied.returncode, 4)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "stale_revision",
+        )
+        self.assertFalse(self.rollback_sentinel.exists())
+
+    def test_rollback_authorization_rejects_unsealed_failed_cycle(self) -> None:
+        self.fail_release_for_contract()
+        active = json.loads(
+            (
+                self.store.run_directory / "release-cycles" / "active-release.json"
+            ).read_text(encoding="utf-8")
+        )
+        (
+            self.store.run_directory
+            / "release-cycles"
+            / str(active["cycle_id"])
+            / "header.json"
+        ).unlink()
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "rollback",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "stale_revision",
+        )
+        self.assertEqual(self.store.load().phase, Phase.BLOCKED)
+        self.assertFalse(self.rollback_sentinel.exists())
 
     def rollback_preapproval(self, mode: ExecutionMode) -> dict[str, object]:
         self.select_mode(mode)
@@ -2002,6 +2435,57 @@ class ExternalContextNextActionTests(unittest.TestCase):
                 engine.release.assert_not_called()
                 engine.rollback.assert_not_called()
                 engine.verify_rollback.assert_not_called()
+
+
+class CleanupPolicyHandlerTests(unittest.TestCase):
+    def test_strict_and_legacy_cleanup_still_require_explicit_approval(self) -> None:
+        state = RunState(
+            run_id="run-cleanup-policy",
+            phase=Phase.AWAITING_CLEANUP_APPROVAL,
+            revision=7,
+            created_at="2026-07-16T00:00:00.000000Z",
+            updated_at="2026-07-16T00:00:00.000000Z",
+        )
+        ownership = SimpleNamespace(worktree_path=Path("/private/owned-worktree"))
+        store = SimpleNamespace()
+        for contract in (
+            SimpleNamespace(mode=ExecutionMode.STRICT),
+            None,
+        ):
+            with self.subTest(source="contract" if contract else "legacy"):
+                output = io.StringIO()
+                with (
+                    redirect_stdout(output),
+                    mock.patch("ship_flow.cli._repository", return_value=object()),
+                    mock.patch(
+                        "ship_flow.cli._preflight",
+                        return_value=(SimpleNamespace(), ownership, store),
+                    ),
+                    mock.patch(
+                        "ship_flow.cli._current_authorization",
+                        return_value=contract,
+                    ),
+                    mock.patch("ship_flow.cli.cleanup_run") as cleanup,
+                ):
+                    return_code = cli_main(
+                        (
+                            "cleanup",
+                            "--repo",
+                            ".",
+                            "--run-id",
+                            state.run_id,
+                            "--expected-revision",
+                            str(state.revision),
+                            "--json",
+                        )
+                    )
+                payload = json.loads(output.getvalue())
+                self.assertEqual(return_code, 4)
+                self.assertEqual(
+                    payload["error"]["code"],
+                    "confirmation_required",
+                )
+                cleanup.assert_not_called()
 
 
 class UnknownOperationCliTests(unittest.TestCase):

@@ -4190,6 +4190,109 @@ class RollbackTests(unittest.TestCase):
             release_approval,
         )
 
+    def test_inspects_sealed_failed_release_context_without_mutation(self) -> None:
+        previous_release = "release-v1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                repo,
+                run_directory,
+                store,
+                manifest,
+                subject,
+                engine,
+                release_approval,
+            ) = self._fixture(
+                root,
+                data_impact="possible",
+                rollback_health_output=previous_release,
+            )
+            engine.release(
+                target="production",
+                approval_id=release_approval.approval_id,
+                previous_release=previous_release,
+            )
+            self.assertEqual(store.load().phase, Phase.ROLLBACK_PENDING)
+            runner = CountingRunner()
+            observer = ReleaseEngine(
+                repo=repo,
+                run_directory=run_directory,
+                manifest=manifest,
+                current_subject=subject,
+                variables=variables(repo),
+                runner=runner,
+            )
+            before = {
+                path.relative_to(run_directory): path.read_bytes()
+                for path in run_directory.rglob("*")
+                if path.is_file()
+            }
+
+            context = observer.inspect_failed_release_context()
+
+            after = {
+                path.relative_to(run_directory): path.read_bytes()
+                for path in run_directory.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(context.mode, "release")
+            self.assertEqual(context.approval_id, release_approval.approval_id)
+            self.assertEqual(context.target, "production")
+            self.assertIsNone(context.failed_release_id)
+            self.assertIsNone(context.previous_release)
+            self.assertEqual(after, before)
+            self.assertEqual(runner.calls, 0)
+
+    def test_failed_release_context_rejects_missing_immutable_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                _,
+                run_directory,
+                store,
+                _,
+                _,
+                engine,
+                release_approval,
+            ) = self._fixture(
+                root,
+                data_impact="possible",
+                rollback_health_output="release-v1",
+            )
+            engine.release(
+                target="production",
+                approval_id=release_approval.approval_id,
+                previous_release="release-v1",
+            )
+            self.assertEqual(store.load().phase, Phase.ROLLBACK_PENDING)
+            active = json.loads(
+                (run_directory / "release-cycles" / "active-release.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            header = (
+                run_directory
+                / "release-cycles"
+                / str(active["cycle_id"])
+                / "header.json"
+            )
+            header.unlink()
+            before = {
+                path.relative_to(run_directory): path.read_bytes()
+                for path in run_directory.rglob("*")
+                if path.is_file()
+            }
+
+            with self.assertRaises(ReleaseRecoveryError):
+                engine.inspect_failed_release_context()
+
+            after = {
+                path.relative_to(run_directory): path.read_bytes()
+                for path in run_directory.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+
     def test_inspects_one_current_rollback_approval_without_running_effects(
         self,
     ) -> None:

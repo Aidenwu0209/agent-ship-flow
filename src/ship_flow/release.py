@@ -2196,6 +2196,80 @@ class ReleaseEngine:
         finally:
             os.close(descriptor)
 
+    def inspect_failed_release_context(self) -> ExternalCycleContext:
+        """Return the sealed failed release while refusing all repair paths."""
+
+        run_path = Path(os.path.abspath(self.run_directory))
+        flags = (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(run_path, flags)
+        except OSError as error:
+            raise ReleaseRecoveryError(
+                "failed release context directory cannot be opened safely"
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise ReleaseRecoveryError("failed release context directory is unsafe")
+            anchor = PrivateRootAnchor(run_path, descriptor)
+            with self.store.anchored(anchor):
+                self._assert_run_root_current()
+                state = self.store.load()
+                if state.phase is not Phase.ROLLBACK_PENDING:
+                    raise ReleaseRecoveryError(
+                        "failed release context requires ROLLBACK_PENDING"
+                    )
+                inspection = _validate_external_operation_evidence(
+                    engine=self,
+                    repo=self.repo,
+                    run_directory=self.run_directory,
+                    manifest=self.manifest,
+                    current_subject=self.current_subject,
+                    variables=self.variables,
+                    phase=state.phase,
+                )
+                if not inspection.active_cycle:
+                    raise ReleaseRecoveryError(
+                        "failed release context has no sealed active cycle"
+                    )
+                active = self._load_active_cycle_unbound("release")
+                approval = self._read_approval_read_only(str(active["approval_id"]))
+                if (
+                    approval.gate != "release"
+                    or approval.consumed_at is None
+                    or approval.subject != self.current_subject
+                    or approval.target != active.get("target")
+                    or active.get("subject") != self.current_subject.to_dict()
+                    or active.get("failed_release_id") is not None
+                    or active.get("previous_release") is not None
+                ):
+                    raise ReleaseRecoveryError(
+                        "failed release context is stale or incomplete"
+                    )
+                context = ExternalCycleContext(
+                    cycle_id=str(active["cycle_id"]),
+                    mode="release",
+                    approval_id=approval.approval_id,
+                    target=approval.target,
+                    failed_release_id=None,
+                    previous_release=None,
+                )
+                self._assert_run_root_current()
+                return context
+        except ReleaseRecoveryError:
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ReleaseRecoveryError(
+                "failed release context cannot be inspected safely"
+            ) from error
+        finally:
+            os.close(descriptor)
+
     def _read_approval_read_only(self, approval_id: str) -> ApprovalRecord:
         seal_payload, _ = self._read_private_canonical_json(
             self._approval_seal_path(approval_id),
