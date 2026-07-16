@@ -1,12 +1,10 @@
 # Scope-Authorized Autonomy Design
 
 **Status:** Approved
-**Implementation status:** Tasks 1-5 are complete. Task 5's original fresh
-pressure validation completed in commit
-`3014a98c08fe02554e549ce9583f5712532a178b`. This reviewer follow-up restores
-an explicit deploy-health safeguard and therefore makes that exact receipt
-historical; fresh canonical pressure validation for the updated Skill is part
-of the remaining whole-branch Task 6 gate, not unfinished Task 5 work.
+**Implementation status:** Tasks 1-5 are complete. Fresh canonical all-eight
+pressure validation and receipt regeneration for the reviewer-corrected Skill
+completed in commit `4c9968724d18343a606153225b67cff130f11588`. Task 6 is
+reserved for whole-branch gates, final independent review, and branch push.
 **Date:** 2026-07-16
 
 ## Goal

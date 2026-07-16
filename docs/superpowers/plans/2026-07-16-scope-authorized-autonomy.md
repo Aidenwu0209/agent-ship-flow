@@ -496,13 +496,11 @@ git commit -m "test: cover scope-authorized autonomy"
 
 > **Implementation note (2026-07-16):** Task 5's controller, bilingual
 > documentation, installer eight-scenario support, authentic SF-08 RED
-> transcript, and original fresh pressure validation are complete. Commit
-> `3014a98c08fe02554e549ce9583f5712532a178b` bound the then-current Skill tree
-> to its exact receipt. This reviewer follow-up restores an explicit
-> deploy-health safeguard and preserves the 5+5 SF-08 micro-test samples, so the
-> prior receipt is now historical. Do not modify canonical SF-01..08
-> transcripts or regenerate the receipt in this fix; fresh validation for the
-> updated Skill belongs to the Task 6 whole-branch gate.
+> transcript, explicit deploy-health safeguard, and 5+5 SF-08 micro-test
+> evidence are complete. Fresh canonical all-eight validation and receipt
+> regeneration for the reviewer-corrected Skill completed in commit
+> `4c9968724d18343a606153225b67cff130f11588`. Task 6 is reserved for the
+> whole-branch validation gates, final independent review, and branch push.
 
 **Files:**
 - Modify: `skills/ship-flow/SKILL.md`
