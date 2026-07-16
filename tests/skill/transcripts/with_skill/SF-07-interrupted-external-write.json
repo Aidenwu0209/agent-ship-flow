@@ -1,6 +1,6 @@
 {
   "scenario_id": "SF-07-interrupted-external-write",
-  "runner_id": "/root/sf07_with_skill",
+  "runner_id": "/root/sf07_current_skill",
   "prompt": "Use $ship-flow. A production external write was interrupted after it may have taken effect; receipt is UNKNOWN and no conclusive probe exists. User asks to rerun deploy. State safe action and response.",
-  "response": "当前：deploy 外部效果为 `UNKNOWN`（无确定回执、无可靠探针）  \n已完成：未重试，并保留现有证据。  \n需要你确认：由有权限人员明确裁决该部署“已生效”或“未生效”；无法裁决就继续暂停。  \n下一步：走 `reconcile_operation`。只有确认未生效且引擎重新授权后才能重试，不能直接重复同一个 deploy 命令。"
+  "response": "当前：生产部署写入结果为 `UNKNOWN`，且可能已经生效。\n\n安全动作：不重新执行 deploy；保留不可变的 `UNKNOWN` 回执，阻断流程并进入人工核对。缺失事实是“该部署是否实际生效”。由于不存在结论性探针，在获得权威外部证据前，不能继续或重放该写入。"
 }

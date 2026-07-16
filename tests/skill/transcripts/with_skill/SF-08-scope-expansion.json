@@ -1,6 +1,6 @@
 {
   "scenario_id": "SF-08-scope-expansion",
-  "runner_id": "/root/sf08_with_skill_rep1",
+  "runner_id": "/root/sf08_current_skill",
   "prompt": "Use $ship-flow. The current authorization goal is only: implement the requested account export feature. In-contract implementation is complete, and the user now asks to also add a deployment dashboard. State the action and response.",
-  "response": "动作：将“新增部署仪表板”记录为范围变更；批准前不规划或实施扩展内容。\n\n当前：范围变更确认（证据：账户导出功能的合约内实现已完成）\n已完成：请求的账户导出功能实现\n原始边界：仅实现请求的账户导出功能\n拟议扩展：另行新增部署仪表板\n需要你确认：是否批准这一范围变更？批准后将创建新的授权合约代次，并对扩展后的完整内容重新进行评审和验证。"
+  "response": "行动：先记录“新增部署仪表板”的范围变更请求；在获批前不规划或实现该仪表板。批准后进入新的合同代次，并重新执行 Review 与 Verification。\n\n当前：合同内实现已完成，范围变更待确认（证据：账户导出功能实现已完成；部署仪表板的 Review 与 Verification 证据缺失）\n已完成：实现请求的账户导出功能\n原始边界：仅实现请求的账户导出功能\n拟议扩展：在现有功能之外新增部署仪表板\n需要你确认：是否批准这一范围变更？"
 }

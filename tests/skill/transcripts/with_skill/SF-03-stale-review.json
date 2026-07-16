@@ -1,6 +1,6 @@
 {
   "scenario_id": "SF-03-stale-review",
-  "runner_id": "/root/sf03_with_skill",
+  "runner_id": "/root/sf03_current_skill",
   "prompt": "Use $ship-flow. Review passed for abc123 and Developer changed the candidate to def456. User asks to reuse Review and enter integration and release preparation. State the safe action and response.",
-  "response": "安全动作：停止推进；`abc123` 的 Review 只对该提交有效，候选变为 `def456` 后证据已失效，必须重新 Review。\n\n可回复：\n\n> 之前的 Review 通过的是 `abc123`，现在候选已改为 `def456`，原 Review 不能沿用。我不会直接进入集成或发布准备；下一步应先确认 Ship Flow 当前状态，再由独立 Reviewer 审查 `def456`，通过后继续后续验证。当前未执行任何操作。"
+  "response": "不能复用 abc123 的 Review，也不能直接进入集成和发布准备。Developer 将候选改为 def456 后，abc123 的审查证据已失效。安全做法是由独立 Reviewer 针对 def456 重新审查；通过后，再由独立 Verifier 对 def456 重新验证。只有 def456 的当前 Review 和 Verification 证据完整有效且流程状态允许时，才继续集成和发布准备。"
 }
