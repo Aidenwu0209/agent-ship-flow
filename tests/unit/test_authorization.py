@@ -373,6 +373,78 @@ class AuthorizationStoreTests(unittest.TestCase):
         self.assertIsNone(self.authorizations.pending())
         self.assertEqual(self.store.load(), self.state)
 
+    def test_request_removes_its_pending_pointer_when_final_cas_is_stale(
+        self,
+    ) -> None:
+        self._create_initial()
+        real_transition = self.store.transition
+
+        def advance_revision_before_scope_transition(
+            next_phase: Phase | str,
+            *,
+            expected_revision: int,
+        ) -> object:
+            real_transition(Phase.BLOCKED, expected_revision=expected_revision)
+            return real_transition(next_phase, expected_revision=expected_revision)
+
+        with mock.patch.object(
+            self.store,
+            "transition",
+            side_effect=advance_revision_before_scope_transition,
+        ):
+            with self.assertRaises(StaleRevisionError):
+                self._request_change(expected_revision=self.state.revision)
+
+        self.assertEqual(len(self._request_archive_files()), 1)
+        self.assertFalse(self.authorizations.pending_path.exists())
+        self.assertIsNone(self.authorizations.pending())
+        self.assertEqual(self.store.load().phase, Phase.BLOCKED)
+
+    def test_stale_cas_cleanup_does_not_remove_another_pending_request(
+        self,
+    ) -> None:
+        self._create_initial()
+        real_transition = self.store.transition
+        replacement: ScopeChangeRequest | None = None
+
+        def replace_pending_and_advance_revision(
+            next_phase: Phase | str,
+            *,
+            expected_revision: int,
+        ) -> object:
+            nonlocal replacement
+            published = ScopeChangeRequest.from_dict(
+                json.loads(self.authorizations.pending_path.read_text(encoding="utf-8"))
+            )
+            replacement = self._request_with_identity(
+                published,
+                summary="another request replaced the pending pointer",
+            )
+            authorization_module._atomic_write_private_json(
+                self._request_archive_path(replacement),
+                replacement.to_dict(),
+                trusted_root=self.store.trusted_root,
+                immutable=True,
+            )
+            authorization_module._atomic_write_private_json(
+                self.authorizations.pending_path,
+                replacement.to_dict(),
+                trusted_root=self.store.trusted_root,
+            )
+            real_transition(Phase.BLOCKED, expected_revision=expected_revision)
+            return real_transition(next_phase, expected_revision=expected_revision)
+
+        with mock.patch.object(
+            self.store,
+            "transition",
+            side_effect=replace_pending_and_advance_revision,
+        ):
+            with self.assertRaises(StaleRevisionError):
+                self._request_change(expected_revision=self.state.revision)
+
+        assert replacement is not None
+        self.assertEqual(self.authorizations.pending(), replacement)
+
     def test_request_rejects_multiple_pending_changes(self) -> None:
         self._create_initial()
         request = self._request_change()

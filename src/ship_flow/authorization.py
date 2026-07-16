@@ -649,6 +649,25 @@ class AuthorizationStore:
             )
         return request
 
+    def _remove_pending_if_matches_locked(
+        self,
+        request: ScopeChangeRequest,
+    ) -> None:
+        pending = self._pending_locked()
+        if pending is None or (
+            pending.request_id != request.request_id
+            or pending.digest() != request.digest()
+        ):
+            return
+        if pending != request:
+            raise StateCorruptionError(
+                "pending scope-change request identity conflicts"
+            )
+        _remove_private_file(
+            self.pending_path,
+            trusted_root=self.store.trusted_root,
+        )
+
     def _load_request_archive_locked(
         self,
         request_id: str,
@@ -999,10 +1018,14 @@ class AuthorizationStore:
                 request.to_dict(),
                 trusted_root=self.store.trusted_root,
             )
-            self.store.transition(
-                Phase.AWAITING_SCOPE_APPROVAL,
-                expected_revision=expected_revision,
-            )
+            try:
+                self.store.transition(
+                    Phase.AWAITING_SCOPE_APPROVAL,
+                    expected_revision=expected_revision,
+                )
+            except StaleRevisionError:
+                self._remove_pending_if_matches_locked(request)
+                raise
             return request
 
     @staticmethod
