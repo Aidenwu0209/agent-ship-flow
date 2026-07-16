@@ -102,6 +102,14 @@ class BeginnerCliFlowTests(unittest.TestCase):
             (self.primary / ".ship" / "manifest.toml").resolve(),
         )
         self.assertTrue(manifest_path.is_file())
+        self.assertEqual(
+            initialized["next_action"],
+            {
+                "kind": "human",
+                "action": "commit_manifest",
+                "manifest": str(manifest_path),
+            },
+        )
         git(self.primary, "add", ".ship/manifest.toml")
         git(self.primary, "commit", "-m", "confirm ship manifest")
 

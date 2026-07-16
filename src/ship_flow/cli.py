@@ -499,6 +499,11 @@ def _handle_init(args: argparse.Namespace) -> dict[str, object]:
         "init",
         accepted=True,
         created=True,
+        next_action={
+            "kind": "human",
+            "action": "commit_manifest",
+            "manifest": str(path),
+        },
         evidence={"manifest": str(path)},
         manifest_sha256=manifest_digest(detected),
     )
