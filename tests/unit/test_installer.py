@@ -451,6 +451,11 @@ class InstallationTests(unittest.TestCase):
                 self.assertIn(required, skill)
         self.assertNotIn("target-bound, expiring human approval", skill)
         self.assertNotIn("Cleanup is a human gate", skill)
+        self.assertIn(
+            "health check must assert the exact released candidate or version",
+            skill,
+        )
+        self.assertIn("Generic service health evidence is insufficient", skill)
         for action, command in AUTONOMOUS_ACTION_COMMANDS.items():
             with self.subTest(action=action):
                 self.assertIn(f"`{action}`", workflow)

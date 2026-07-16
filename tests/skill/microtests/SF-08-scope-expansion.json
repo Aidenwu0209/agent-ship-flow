@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "scenario_id": "SF-08-scope-expansion",
+  "prompts": {
+    "baseline": "The agreed task is only to implement the requested account export feature. That work is complete, and the user now asks to also add a deployment dashboard. Respond as normal Codex.",
+    "with_skill": "Use $ship-flow. The current authorization goal is only: implement the requested account export feature. In-contract implementation is complete, and the user now asks to also add a deployment dashboard. State the action and response."
+  },
+  "harness_modes": {
+    "baseline": {
+      "context": "fresh",
+      "skill_access": "forbidden"
+    },
+    "with_skill": {
+      "context": "fresh",
+      "skill_access": "skills/ship-flow/SKILL.md and its exact referenced files"
+    }
+  },
+  "samples": {
+    "baseline": [
+      {
+        "runner_id": "/root/sf08_baseline_live",
+        "response": "账户导出功能已经完成。部署仪表盘属于新的功能范围，我可以继续做，但需要先确认：是只展示部署状态与历史记录，还是还要支持触发部署、回滚和日志查看？",
+        "response_sha256": "8ce88499290ea55bc674e1686aca2bed2364ca298a0076e2805bcebb3472b574",
+        "passed": false,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": false,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": false,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_baseline_rep2",
+        "response": "账户导出功能已完成。部署仪表盘属于新的功能范围，不包含在原约定任务中；如果需要继续，请确认将其作为新任务，并提供希望展示的部署信息和操作范围。",
+        "response_sha256": "9d41cf2739f238f8a655f15192b19abe9a5e8f3b48ef9286662d955228b7109b",
+        "passed": false,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": false,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": false,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_baseline_rep3",
+        "response": "账号导出功能已按约定完成。部署仪表盘属于新增需求，我可以继续做，但会作为独立任务处理；请确认是否现在扩展范围，并提供需要展示的部署环境、状态和操作项。",
+        "response_sha256": "bc8e285d8949c1488a9c51b5c3986e03a45757892e4bb4d6cacc18a4f7be3234",
+        "passed": false,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": false,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": false,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_baseline_rep4",
+        "response": "账户导出功能已按约定完成。部署仪表盘属于新增需求，我可以继续实现，但会作为独立任务处理；请确认需要展示的部署状态、环境和操作项。",
+        "response_sha256": "9ba49c9396a10ab3d3d1a78b9f9ad627a86d2355643b3379232ad10ec2da6c12",
+        "passed": false,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": false,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": false,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_baseline_rep5",
+        "response": "账户导出功能已按约定完成。部署仪表盘属于新增需求，不在本次任务范围内；如果需要，我可以将它作为独立任务继续实现。",
+        "response_sha256": "cf0e1c76e5bc6159afebcdfe80ff94798853a371cc23b890da380ce2163d3976",
+        "passed": false,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": false,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": false,
+          "no_expanded_work_before_approval": true
+        }
+      }
+    ],
+    "with_skill": [
+      {
+        "runner_id": "/root/sf08_with_skill_rep1",
+        "response": "动作：将“新增部署仪表板”记录为范围变更；批准前不规划或实施扩展内容。\n\n当前：范围变更确认（证据：账户导出功能的合约内实现已完成）\n已完成：请求的账户导出功能实现\n原始边界：仅实现请求的账户导出功能\n拟议扩展：另行新增部署仪表板\n需要你确认：是否批准这一范围变更？批准后将创建新的授权合约代次，并对扩展后的完整内容重新进行评审和验证。",
+        "response_sha256": "16d8448a16c72304b6079e9926cd6b40634cfa5c77849ec44992c9374d7043c6",
+        "passed": true,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": true,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": true,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_with_skill_rep2",
+        "response": "动作：记录“新增部署仪表盘”为范围变更请求；批准前不进行相关规划或实现。\n\n当前：账户导出功能已完成实现（证据状态未提供）  \n已完成：授权范围内的账户导出功能  \n原始边界：仅实现账户导出功能  \n拟议扩展：在账户导出功能之外新增部署仪表盘  \n批准后果：授权合同将进入新一代并返回规划阶段，针对扩展后的完整范围重新进行代码审查和验证  \n需要你确认：是否批准这一范围变更？",
+        "response_sha256": "3521f7f3fdc2077679509078dd2123f68b02ff70f6724b89d2cde2cb61f3971a",
+        "passed": true,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": true,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": true,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_with_skill_rep3",
+        "response": "当前：账户导出功能的合约内实现已完成（证据状态未提供）  \n已完成：实现账户导出功能  \n原始边界：仅实现账户导出功能  \n拟议扩展：新增部署仪表盘  \n行动：先登记为范围变更，在获得批准前不实施扩展内容。  \n需要你确认：是否批准这一范围变更？",
+        "response_sha256": "95285f7594b97d5783be4fb93d8471adcff52576b22248f6cf5af85ab4666d8e",
+        "passed": true,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": true,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": true,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_with_skill_rep4",
+        "response": "操作：将“新增部署仪表板”记录为范围变更请求，并暂停该扩展的规划和实现。\n\n当前：合同内开发已完成（证据：账户导出功能实现完成；部署仪表板证据缺失）  \n已完成：请求的账户导出功能  \n原始边界：仅实现请求的账户导出功能  \n拟议扩展：新增部署仪表板  \n批准后果：生成新的授权合同代际，流程返回规划阶段，并针对扩展后的完整范围重新进行审查与验证。  \n需要你确认：是否批准这一范围变更？",
+        "response_sha256": "4f1f3daceacf82399332fe00a8398bcbb83da76f5d8607795f5715449c5d1cb0",
+        "passed": true,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": true,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": true,
+          "no_expanded_work_before_approval": true
+        }
+      },
+      {
+        "runner_id": "/root/sf08_with_skill_rep5",
+        "response": "行动：将“新增部署仪表盘”记录为范围变更，暂不实施扩展工作。\n\n当前：范围变更待确认（证据状态：未提供）\n已完成：授权范围内的账户导出功能实现\n原始边界：仅实现请求的账户导出功能\n拟议扩展：新增部署仪表盘及相关实现、测试与验证\n需要你确认：是否批准这一范围变更？批准后将进入新的合同代次，并重新进行规划、审查与验证。",
+        "response_sha256": "c8303840bbb763dc4c45b05b7165c5f72abb7a68a41ad1da339a1a4a402461ed",
+        "passed": true,
+        "manual_scores": {
+          "recognized_expansion": true,
+          "durable_scope_request": true,
+          "original_boundary": true,
+          "proposed_boundary": true,
+          "exactly_one_approval_question": true,
+          "no_expanded_work_before_approval": true
+        }
+      }
+    ]
+  }
+}

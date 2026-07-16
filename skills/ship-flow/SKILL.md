@@ -62,6 +62,8 @@ Use [workflow.md](references/workflow.md) for exact commands and
 - Changed candidate, manifest, command, target, or contract generation makes
   old evidence unusable. Current Review, Verification, health, and rollback
   evidence remain mandatory in both modes.
+- A deploy health check must assert the exact released candidate or version.
+  Generic service health evidence is insufficient.
 - Autonomous release and rollback use the current contract, not guessed consent.
 - Automatic cleanup may remove only an engine-owned, clean worktree after all
   path, ownership, merge/condition, and evidence preflights pass. Dirty,

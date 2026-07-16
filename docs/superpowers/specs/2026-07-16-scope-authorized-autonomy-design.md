@@ -1,9 +1,12 @@
 # Scope-Authorized Autonomy Design
 
 **Status:** Approved
-**Implementation status:** Tasks 1-4 complete; the Task 5 controller and user
-documentation are implemented. Fresh with-Skill pressure validation and the
-whole-branch Task 6 gate remain pending.
+**Implementation status:** Tasks 1-5 are complete. Task 5's original fresh
+pressure validation completed in commit
+`3014a98c08fe02554e549ce9583f5712532a178b`. This reviewer follow-up restores
+an explicit deploy-health safeguard and therefore makes that exact receipt
+historical; fresh canonical pressure validation for the updated Skill is part
+of the remaining whole-branch Task 6 gate, not unfinished Task 5 work.
 **Date:** 2026-07-16
 
 ## Goal
