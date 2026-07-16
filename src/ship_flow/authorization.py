@@ -958,6 +958,14 @@ class AuthorizationStore:
             if contract is None:
                 raise ValueError("scope changes require an authorization contract")
             state = self.store.load()
+            if (
+                state.phase is not Phase.AWAITING_SCOPE_APPROVAL
+                and Phase.AWAITING_SCOPE_APPROVAL not in LEGAL_TRANSITIONS[state.phase]
+            ):
+                raise InvalidTransitionError(
+                    f"cannot transition from {state.phase.value} "
+                    f"to {Phase.AWAITING_SCOPE_APPROVAL.value}"
+                )
             pending = self._reconcile_orphan_pending_locked(
                 self._pending_locked(),
                 state=state,
@@ -990,14 +998,13 @@ class AuthorizationStore:
                     reason="scope-request-publication-recovered",
                 )
                 return pending
+            if state.phase is Phase.AWAITING_SCOPE_APPROVAL:
+                raise InvalidTransitionError(
+                    "scope approval state is missing its pending request"
+                )
             if state.revision != expected_revision:
                 raise StaleRevisionError(
                     f"expected revision {expected_revision}, found {state.revision}"
-                )
-            if Phase.AWAITING_SCOPE_APPROVAL not in LEGAL_TRANSITIONS[state.phase]:
-                raise InvalidTransitionError(
-                    f"cannot transition from {state.phase.value} "
-                    f"to {Phase.AWAITING_SCOPE_APPROVAL.value}"
                 )
             request = self._prepared_request_locked(
                 run_id=state.run_id,

@@ -10,7 +10,12 @@ from pathlib import Path
 from unittest import mock
 
 from ship_flow import store as store_module
-from ship_flow.model import LEGAL_TRANSITIONS, OperationStatus, Phase
+from ship_flow.model import (
+    LEGAL_TRANSITIONS,
+    RECONCILIATION_TRANSITIONS,
+    OperationStatus,
+    Phase,
+)
 from ship_flow.store import (
     FileLock,
     InvalidTransitionError,
@@ -89,11 +94,6 @@ class StateModelTests(unittest.TestCase):
             Phase.CODE_REVIEW,
             Phase.VERIFYING,
             Phase.AWAITING_RELEASE_APPROVAL,
-            Phase.RELEASING,
-            Phase.POST_RELEASE_VERIFYING,
-            Phase.ROLLBACK_PENDING,
-            Phase.ROLLING_BACK,
-            Phase.ROLLBACK_VERIFYING,
             Phase.SYNCING,
             Phase.AWAITING_CLEANUP_APPROVAL,
         }
@@ -105,6 +105,20 @@ class StateModelTests(unittest.TestCase):
             {phase: set(targets) for phase, targets in LEGAL_TRANSITIONS.items()},
             expected,
         )
+
+    def test_external_cycle_phases_cannot_reconcile_into_scope_approval(self) -> None:
+        for phase in (
+            Phase.RELEASING,
+            Phase.POST_RELEASE_VERIFYING,
+            Phase.ROLLBACK_PENDING,
+            Phase.ROLLING_BACK,
+            Phase.ROLLBACK_VERIFYING,
+        ):
+            with self.subTest(phase=phase.value):
+                self.assertNotIn(
+                    Phase.AWAITING_SCOPE_APPROVAL,
+                    RECONCILIATION_TRANSITIONS[phase],
+                )
 
     def test_operation_status_has_durable_receipt_states(self) -> None:
         self.assertEqual(

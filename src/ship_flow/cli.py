@@ -928,16 +928,91 @@ def _require_autonomous_contract(store: StateStore) -> AuthorizationContract:
     return contract
 
 
+def _require_live_autonomous_contract(
+    repository: GitRepository,
+    run_id: str,
+    ownership: WorktreeOwnership,
+    store: StateStore,
+) -> AuthorizationContract:
+    contract = _require_autonomous_contract(store)
+    state = store.load()
+    live_manifest = _load_safe_manifest(ownership.worktree_path)
+    live_repository = str(repository.primary_checkout.resolve())
+    owned_repository = str(ownership.primary_checkout.resolve())
+    live_worktree = str(ownership.worktree_path.resolve())
+    identities_match = (
+        contract.run_id == run_id
+        and state.run_id == run_id
+        and ownership.run_id == run_id
+        and contract.repository == live_repository
+        and contract.repository == owned_repository
+        and contract.worktree == live_worktree
+        and contract.branch == ownership.branch
+        and contract.manifest_sha256 == manifest_digest(live_manifest)
+    )
+    if not identities_match:
+        raise CliFailure(
+            "scope_change_required",
+            "当前运行身份或流程配置已超出授权合约，请先执行 request-scope-change。",
+            4,
+        )
+    return contract
+
+
+def _preflight_autonomous_gate(
+    repository: GitRepository,
+    run_id: str,
+    expected_revision: int,
+    allowed: Sequence[Phase],
+) -> tuple[ReconciledRun, WorktreeOwnership, StateStore, AuthorizationContract]:
+    initial_ownership, initial_store = _load_run(repository, run_id)
+    _require_expected_revision(initial_store, expected_revision)
+    _require_live_autonomous_contract(
+        repository,
+        run_id,
+        initial_ownership,
+        initial_store,
+    )
+    run, ownership, store = _preflight(
+        repository,
+        run_id,
+        expected_revision,
+        allowed,
+    )
+    contract = _require_live_autonomous_contract(
+        repository,
+        run_id,
+        ownership,
+        store,
+    )
+    return run, ownership, store, contract
+
+
+def _require_human_approval_mode(store: StateStore) -> None:
+    contract = _current_authorization(store)
+    if contract is not None and contract.mode is ExecutionMode.AUTONOMOUS:
+        raise CliFailure(
+            "authorization_required",
+            "自动运行必须使用 authorize，不能写入人工 approve 收据。",
+            4,
+        )
+
+
 def _handle_authorize(args: argparse.Namespace) -> dict[str, object]:
     repository = _repository(args.repo)
     if args.gate == "plan":
-        run, _, store = _preflight(
+        run, ownership, store, contract = _preflight_autonomous_gate(
             repository,
             args.run_id,
             args.expected_revision,
             (Phase.AWAITING_PLAN_APPROVAL,),
         )
-        contract = _require_autonomous_contract(store)
+        contract = _require_live_autonomous_contract(
+            repository,
+            args.run_id,
+            ownership,
+            store,
+        )
         record = record_plan_approval(
             store,
             current_subject=_subject_for(run),
@@ -961,19 +1036,24 @@ def _handle_authorize(args: argparse.Namespace) -> dict[str, object]:
             },
         )
     if args.gate == "release":
-        run, ownership, store = _preflight(
+        run, ownership, store, contract = _preflight_autonomous_gate(
             repository,
             args.run_id,
             args.expected_revision,
             (Phase.AWAITING_RELEASE_APPROVAL,),
         )
-        contract = _require_autonomous_contract(store)
         if contract.release_target is None:
             raise CliFailure(
                 "invalid_input",
                 "当前授权合约未声明发布目标。",
                 5,
             )
+        contract = _require_live_autonomous_contract(
+            repository,
+            args.run_id,
+            ownership,
+            store,
+        )
         record = _release_engine(run, ownership).record_approval(
             gate="release",
             target=contract.release_target,
@@ -1002,13 +1082,12 @@ def _handle_authorize(args: argparse.Namespace) -> dict[str, object]:
                 )
             },
         )
-    run, ownership, store = _preflight(
+    run, ownership, store, contract = _preflight_autonomous_gate(
         repository,
         args.run_id,
         args.expected_revision,
         (Phase.ROLLBACK_PENDING,),
     )
-    contract = _require_autonomous_contract(store)
     if contract.release_target is None:
         raise CliFailure(
             "invalid_input",
@@ -1029,6 +1108,12 @@ def _handle_authorize(args: argparse.Namespace) -> dict[str, object]:
             "失败发布目标超出当前授权合约。",
             4,
         )
+    contract = _require_live_autonomous_contract(
+        repository,
+        args.run_id,
+        ownership,
+        store,
+    )
     record = engine.record_approval(
         gate="rollback",
         target=contract.release_target,
@@ -1065,6 +1150,9 @@ def _handle_authorize(args: argparse.Namespace) -> dict[str, object]:
 
 def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
     repository = _repository(args.repo)
+    _, initial_store = _load_run(repository, args.run_id)
+    _require_expected_revision(initial_store, args.expected_revision)
+    _require_human_approval_mode(initial_store)
     if args.gate == "plan":
         run, _, store = _preflight(
             repository,
@@ -1072,6 +1160,7 @@ def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
             args.expected_revision,
             (Phase.AWAITING_PLAN_APPROVAL,),
         )
+        _require_human_approval_mode(store)
         record = record_plan_approval(
             store,
             current_subject=_subject_for(run),
@@ -1081,6 +1170,7 @@ def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
         return _success(
             "approve",
             gate="plan",
+            authorization_source="human_approval",
             approval_id=record.approval_id,
             state=_state_payload(state),
             next_action=_policy_aware_state_action(store, state),
@@ -1104,6 +1194,7 @@ def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
         args.expected_revision,
         allowed,
     )
+    _require_human_approval_mode(store)
     if not args.target:
         raise CliFailure("invalid_input", "该审批必须指定目标。", 5)
     engine = _release_engine(run, ownership)
@@ -1155,6 +1246,7 @@ def _handle_approve(args: argparse.Namespace) -> dict[str, object]:
     return _success(
         "approve",
         gate=args.gate,
+        authorization_source="human_approval",
         approval_id=record.approval_id,
         target=record.target,
         approval=approval,
@@ -1456,16 +1548,36 @@ def _handle_record_sync(args: argparse.Namespace) -> dict[str, object]:
 
 def _handle_cleanup(args: argparse.Namespace) -> dict[str, object]:
     repository = _repository(args.repo)
+    initial_ownership, initial_store = _load_run(repository, args.run_id)
+    _require_expected_revision(initial_store, args.expected_revision)
+    initial_contract = _current_authorization(initial_store)
+    if (
+        initial_contract is not None
+        and initial_contract.mode is ExecutionMode.AUTONOMOUS
+    ):
+        _require_live_autonomous_contract(
+            repository,
+            args.run_id,
+            initial_ownership,
+            initial_store,
+        )
     run, ownership, store = _preflight(
         repository,
         args.run_id,
         args.expected_revision,
         (Phase.AWAITING_CLEANUP_APPROVAL,),
     )
+    contract = _current_authorization(store)
     if not args.approve:
-        contract = _current_authorization(store)
         if contract is None or contract.mode is not ExecutionMode.AUTONOMOUS:
             raise CliFailure("confirmation_required", "清理需要人工确认。", 4)
+    if contract is not None and contract.mode is ExecutionMode.AUTONOMOUS:
+        _require_live_autonomous_contract(
+            repository,
+            args.run_id,
+            ownership,
+            store,
+        )
     completed = cleanup_run(
         repository,
         args.run_id,

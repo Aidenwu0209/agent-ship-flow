@@ -727,6 +727,123 @@ class AuthorizationStoreTests(unittest.TestCase):
         self.assertFalse(self.authorizations.pending_path.exists())
         self.assertEqual(self.store.load(), blocked)
 
+    def test_external_cycle_phases_reject_before_writing_scope_artifacts(self) -> None:
+        paths = {
+            Phase.RELEASING: (
+                Phase.PLANNING,
+                Phase.PLAN_REVIEW,
+                Phase.AWAITING_PLAN_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.CODE_REVIEW,
+                Phase.VERIFYING,
+                Phase.AWAITING_RELEASE_APPROVAL,
+                Phase.RELEASING,
+            ),
+            Phase.POST_RELEASE_VERIFYING: (
+                Phase.PLANNING,
+                Phase.PLAN_REVIEW,
+                Phase.AWAITING_PLAN_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.CODE_REVIEW,
+                Phase.VERIFYING,
+                Phase.AWAITING_RELEASE_APPROVAL,
+                Phase.RELEASING,
+                Phase.POST_RELEASE_VERIFYING,
+            ),
+            Phase.ROLLBACK_PENDING: (
+                Phase.PLANNING,
+                Phase.PLAN_REVIEW,
+                Phase.AWAITING_PLAN_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.CODE_REVIEW,
+                Phase.VERIFYING,
+                Phase.AWAITING_RELEASE_APPROVAL,
+                Phase.RELEASING,
+                Phase.ROLLBACK_PENDING,
+            ),
+            Phase.ROLLING_BACK: (
+                Phase.PLANNING,
+                Phase.PLAN_REVIEW,
+                Phase.AWAITING_PLAN_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.CODE_REVIEW,
+                Phase.VERIFYING,
+                Phase.AWAITING_RELEASE_APPROVAL,
+                Phase.RELEASING,
+                Phase.ROLLBACK_PENDING,
+                Phase.ROLLING_BACK,
+            ),
+            Phase.ROLLBACK_VERIFYING: (
+                Phase.PLANNING,
+                Phase.PLAN_REVIEW,
+                Phase.AWAITING_PLAN_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.CODE_REVIEW,
+                Phase.VERIFYING,
+                Phase.AWAITING_RELEASE_APPROVAL,
+                Phase.RELEASING,
+                Phase.ROLLBACK_PENDING,
+                Phase.ROLLING_BACK,
+                Phase.ROLLBACK_VERIFYING,
+            ),
+        }
+        for phase, transitions in paths.items():
+            with self.subTest(phase=phase.value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repository = root / "repository"
+                worktree = root / "worktree"
+                repository.mkdir()
+                worktree.mkdir()
+                store = StateStore(root / "runs" / f"run-{phase.value.lower()}")
+                state = store.create(f"run-{phase.value.lower()}")
+                authorizations = AuthorizationStore(store)
+                contract = authorizations.create_initial(
+                    mode=ExecutionMode.AUTONOMOUS,
+                    goal="ship the requested repository change",
+                    repository=repository,
+                    worktree=worktree,
+                    branch="feat/example",
+                    manifest_sha256="a" * 64,
+                    release_target="production",
+                    previous_release="v1",
+                    state_revision=state.revision,
+                )
+                for target in transitions:
+                    state = store.transition(target, expected_revision=state.revision)
+                before = {
+                    path.relative_to(store.run_directory): path.read_bytes()
+                    for path in store.run_directory.rglob("*")
+                    if path.is_file()
+                }
+
+                with self.assertRaises(InvalidTransitionError):
+                    authorizations.request_change(
+                        reason="manifest_drift",
+                        summary="verification command changed",
+                        proposed_goal=contract.goal,
+                        proposed_manifest_sha256="b" * 64,
+                        proposed_release_target=contract.release_target,
+                        proposed_previous_release=contract.previous_release,
+                        expected_revision=state.revision,
+                    )
+
+                after = {
+                    path.relative_to(store.run_directory): path.read_bytes()
+                    for path in store.run_directory.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertEqual(store.load(), state)
+                self.assertFalse(authorizations.pending_path.exists())
+                self.assertEqual(
+                    list(
+                        (store.run_directory / "authorization" / "requests").glob(
+                            "*.json"
+                        )
+                    ),
+                    [],
+                )
+
     def test_request_rejects_invalid_digest_and_empty_reason(self) -> None:
         self._create_initial()
 

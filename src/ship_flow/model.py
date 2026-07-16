@@ -90,7 +90,6 @@ LEGAL_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
             {
                 Phase.POST_RELEASE_VERIFYING,
                 Phase.ROLLBACK_PENDING,
-                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
@@ -99,23 +98,17 @@ LEGAL_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
                 Phase.SYNCING,
                 Phase.ROLLBACK_PENDING,
                 Phase.ROLLING_BACK,
-                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
-        Phase.ROLLBACK_PENDING: frozenset(
-            {Phase.ROLLING_BACK, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
-        ),
+        Phase.ROLLBACK_PENDING: frozenset({Phase.ROLLING_BACK, Phase.BLOCKED}),
         Phase.ROLLING_BACK: frozenset(
             {
                 Phase.ROLLBACK_VERIFYING,
-                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
-        Phase.ROLLBACK_VERIFYING: frozenset(
-            {Phase.ROLLED_BACK, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
-        ),
+        Phase.ROLLBACK_VERIFYING: frozenset({Phase.ROLLED_BACK, Phase.BLOCKED}),
         Phase.ROLLED_BACK: frozenset(),
         Phase.SYNCING: frozenset(
             {
@@ -182,17 +175,11 @@ RECONCILIATION_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
                 Phase.BLOCKED,
             }
         ),
-        Phase.RELEASING: frozenset({Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}),
-        Phase.POST_RELEASE_VERIFYING: frozenset(
-            {Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
-        ),
-        Phase.ROLLBACK_PENDING: frozenset(
-            {Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
-        ),
-        Phase.ROLLING_BACK: frozenset({Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}),
-        Phase.ROLLBACK_VERIFYING: frozenset(
-            {Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
-        ),
+        Phase.RELEASING: frozenset({Phase.BLOCKED}),
+        Phase.POST_RELEASE_VERIFYING: frozenset({Phase.BLOCKED}),
+        Phase.ROLLBACK_PENDING: frozenset({Phase.BLOCKED}),
+        Phase.ROLLING_BACK: frozenset({Phase.BLOCKED}),
+        Phase.ROLLBACK_VERIFYING: frozenset({Phase.BLOCKED}),
         Phase.SYNCING: frozenset(
             {
                 Phase.PLANNING,

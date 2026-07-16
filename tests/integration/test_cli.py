@@ -14,7 +14,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ship_flow import release as release_module
-from ship_flow.authorization import AuthorizationStore, ExecutionMode
+from ship_flow.authorization import (
+    AuthorizationContract,
+    AuthorizationStore,
+    ExecutionMode,
+)
 from ship_flow.cli import _approval_aware_next_action, main as cli_main
 from ship_flow.gitops import GitRepository, commit_candidate
 from ship_flow.manifest import (
@@ -166,7 +170,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
     def start_developing(self) -> tuple[dict[str, object], int]:
         started, revision, _ = self.start_awaiting_plan_approval()
         approved = self.success(
-            "approve",
+            "authorize",
             "--repo",
             str(self.primary),
             "--run-id",
@@ -175,8 +179,6 @@ class BeginnerCliFlowTests(unittest.TestCase):
             str(revision),
             "--gate",
             "plan",
-            "--actor",
-            "human-owner",
         )
         self.assertEqual(self.state(approved)["phase"], "DEVELOPING")
         return started, int(self.state(approved)["revision"])
@@ -618,6 +620,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "--actor",
             "strict-human-owner",
         )
+        self.assertEqual(plan_approved["authorization_source"], "human_approval")
         collect(plan_approved)
 
         (self.worktree / "feature.txt").write_text(
@@ -683,6 +686,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "--target",
             "production",
         )
+        self.assertEqual(release_approved["authorization_source"], "human_approval")
         release_action = collect(release_approved)
         released = self.success(
             "release",
@@ -861,7 +865,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
         revision = int(self.state(plan_reviewed)["revision"])
 
         approved = self.success(
-            "approve",
+            "authorize",
             "--repo",
             str(self.primary),
             "--run-id",
@@ -870,8 +874,6 @@ class BeginnerCliFlowTests(unittest.TestCase):
             str(revision),
             "--gate",
             "plan",
-            "--actor",
-            "human-owner",
         )
         self.assertEqual(self.state(approved)["phase"], "DEVELOPING")
         revision = int(self.state(approved)["revision"])
@@ -1139,6 +1141,88 @@ class BeginnerCliFlowTests(unittest.TestCase):
             f"scope-contract:{started['authorization']['digest']}",  # type: ignore[index]
         )
 
+    def test_autonomous_plan_approve_is_rejected_without_receipt(self) -> None:
+        _, revision, _ = self.start_awaiting_plan_approval()
+        repository = GitRepository.discover(self.primary)
+        store = StateStore(
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        before = {
+            path.relative_to(store.run_directory): path.read_bytes()
+            for path in store.run_directory.rglob("*")
+            if path.is_file()
+        }
+
+        denied = self.cli(
+            "approve",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+            "--actor",
+            "human-owner",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "authorization_required",
+        )
+
+        after = {
+            path.relative_to(store.run_directory): path.read_bytes()
+            for path in store.run_directory.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+
+    def test_direct_plan_authorization_revalidates_manifest_before_receipt(
+        self,
+    ) -> None:
+        _, revision, _ = self.start_awaiting_plan_approval()
+        repository = GitRepository.discover(self.primary)
+        store = StateStore(
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        manifest_path = self.worktree / ".ship" / "manifest.toml"
+        write_manifest(
+            manifest_path,
+            replace(load_manifest(manifest_path), max_review_rounds=4),
+        )
+        before = {
+            path.relative_to(store.run_directory): path.read_bytes()
+            for path in store.run_directory.rglob("*")
+            if path.is_file()
+        }
+
+        denied = self.cli(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "scope_change_required",
+        )
+        after = {
+            path.relative_to(store.run_directory): path.read_bytes()
+            for path in store.run_directory.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+
     def test_plan_authorization_rejects_strict_contract(self) -> None:
         _, revision, _ = self.start_awaiting_plan_approval(mode="strict")
 
@@ -1159,6 +1243,21 @@ class BeginnerCliFlowTests(unittest.TestCase):
             json.loads(denied.stdout)["error"]["code"],
             "authorization_required",
         )
+
+        approved = self.success(
+            "approve",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+            "--actor",
+            "strict-human-owner",
+        )
+        self.assertEqual(approved["authorization_source"], "human_approval")
 
     def test_plan_authorization_rejects_legacy_run_without_contract(self) -> None:
         write_manifest(
@@ -1226,6 +1325,21 @@ class BeginnerCliFlowTests(unittest.TestCase):
             json.loads(denied.stdout)["error"]["code"],
             "authorization_required",
         )
+
+        approved = self.success(
+            "approve",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(revision),
+            "--gate",
+            "plan",
+            "--actor",
+            "legacy-human-owner",
+        )
+        self.assertEqual(approved["authorization_source"], "human_approval")
 
     def test_immediate_strict_plan_review_response_keeps_human_gate(self) -> None:
         _, _, strict = self.start_awaiting_plan_approval(mode="strict")
@@ -2259,6 +2373,56 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
         )
         self.assertFalse(self.release_sentinel.exists())
 
+    def test_autonomous_release_approve_rejects_even_mismatched_target(self) -> None:
+        self.select_mode(ExecutionMode.AUTONOMOUS, release_target="production")
+        before = self.run_files()
+
+        denied = self.cli(
+            "approve",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "release",
+            "--actor",
+            "human-owner",
+            "--target",
+            "staging",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "authorization_required",
+        )
+        self.assertEqual(self.run_files(), before)
+        self.assertFalse(self.release_sentinel.exists())
+
+    def test_direct_release_authorization_revalidates_manifest_before_receipt(
+        self,
+    ) -> None:
+        self.select_mode(ExecutionMode.AUTONOMOUS)
+        write_manifest(
+            self.ownership.worktree_path / ".ship" / "manifest.toml",
+            replace(self.manifest, max_review_rounds=4),
+        )
+        before = self.run_files()
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "release",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "scope_change_required",
+        )
+        self.assertEqual(self.run_files(), before)
+        self.assertFalse(self.release_sentinel.exists())
+
     def fail_release_for_contract(
         self,
         *,
@@ -2375,8 +2539,62 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
         )
         self.assertFalse(self.rollback_sentinel.exists())
 
-    def test_rollback_authorization_rejects_stale_contract_generation(self) -> None:
+    def test_autonomous_rollback_approve_is_rejected_without_receipt(self) -> None:
+        release_approval = self.fail_release_for_contract()
+        before = self.run_files()
+
+        denied = self.cli(
+            "approve",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "rollback",
+            "--actor",
+            "human-owner",
+            "--target",
+            "production",
+            "--failed-release-id",
+            release_approval.approval_id,
+            "--previous-release",
+            "release-v1",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "authorization_required",
+        )
+        self.assertEqual(self.run_files(), before)
+        self.assertFalse(self.rollback_sentinel.exists())
+
+    def test_direct_rollback_authorization_revalidates_manifest_before_receipt(
+        self,
+    ) -> None:
         self.fail_release_for_contract()
+        write_manifest(
+            self.ownership.worktree_path / ".ship" / "manifest.toml",
+            replace(self.manifest, max_review_rounds=4),
+        )
+        before = self.run_files()
+
+        denied = self.cli(
+            "authorize",
+            "--expected-revision",
+            str(self.store.load().revision),
+            "--gate",
+            "rollback",
+        )
+
+        self.assertEqual(denied.returncode, 4, msg=denied.stdout)
+        self.assertEqual(
+            json.loads(denied.stdout)["error"]["code"],
+            "scope_change_required",
+        )
+        self.assertEqual(self.run_files(), before)
+        self.assertFalse(self.rollback_sentinel.exists())
+
+    def test_rollback_authorization_rejects_stale_contract_generation(self) -> None:
+        self.select_mode(ExecutionMode.AUTONOMOUS)
         authorizations = AuthorizationStore(self.store)
         stale_revision = self.store.load().revision
         contract = authorizations.current()
@@ -2384,7 +2602,7 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
         authorizations.request_change(
             reason="rollback_scope_change",
             summary="change rollback authorization generation",
-            proposed_goal=contract.goal,
+            proposed_goal=f"{contract.goal} with expanded rollback scope",
             proposed_manifest_sha256=contract.manifest_sha256,
             proposed_release_target=contract.release_target,
             proposed_previous_release=contract.previous_release,
@@ -2441,7 +2659,15 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
         self.assertEqual(self.store.load().phase, Phase.BLOCKED)
         self.assertFalse(self.rollback_sentinel.exists())
 
-    def rollback_preapproval(self, mode: ExecutionMode) -> dict[str, object]:
+    def rollback_preapproval(
+        self,
+        mode: ExecutionMode,
+    ) -> tuple[
+        subprocess.CompletedProcess[str],
+        dict[str, object],
+        str,
+        dict[Path, bytes],
+    ]:
         self.select_mode(mode)
         release_approval = self.engine.record_approval(
             gate="release",
@@ -2449,6 +2675,7 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             approver_actor="release-owner",
             expires_at="2999-01-01T00:00:00Z",
         )
+        before_approve = self.run_files()
         revision = self.store.load().revision
         completed = subprocess.run(
             (
@@ -2487,50 +2714,31 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             text=True,
             check=False,
         )
+        payload = json.loads(completed.stdout)
+        return completed, payload, release_approval.approval_id, before_approve
+
+    def test_autonomous_safe_rollback_preapproval_is_rejected(self) -> None:
+        completed, payload, _, before = self.rollback_preapproval(
+            ExecutionMode.AUTONOMOUS
+        )
+
+        self.assertEqual(completed.returncode, 4, msg=completed.stdout)
+        self.assertEqual(payload["error"]["code"], "authorization_required")
+        self.assertEqual(self.run_files(), before)
+
+    def test_strict_safe_rollback_preapproval_keeps_release_human_gate(
+        self,
+    ) -> None:
+        completed, payload, release_approval_id, _ = self.rollback_preapproval(
+            ExecutionMode.STRICT
+        )
         self.assertEqual(
             completed.returncode,
             0,
             msg=f"stdout={completed.stdout!r}\nstderr={completed.stderr!r}",
         )
-        payload = json.loads(completed.stdout)
-        payload["release_approval_id"] = release_approval.approval_id
-        return payload
-
-    def test_autonomous_safe_rollback_preapproval_keeps_release_action_identity(
-        self,
-    ) -> None:
-        payload = self.rollback_preapproval(ExecutionMode.AUTONOMOUS)
-        release_approval_id = payload.pop("release_approval_id")
         rollback_approval_id = payload["approval_id"]
-
-        self.assertNotEqual(rollback_approval_id, release_approval_id)
-        self.assertEqual(
-            payload["next_action"],
-            {
-                "phase": "AWAITING_RELEASE_APPROVAL",
-                "kind": "automatic",
-                "action": "release",
-                "approval_id": release_approval_id,
-                "target": "production",
-            },
-        )
-        self.assertEqual(
-            payload["approval"],
-            {
-                "gate": "rollback",
-                "approval_id": rollback_approval_id,
-                "target": "production",
-                "failed_release_id": release_approval_id,
-                "previous_release": "release-v1",
-            },
-        )
-
-    def test_strict_safe_rollback_preapproval_keeps_release_human_gate(
-        self,
-    ) -> None:
-        payload = self.rollback_preapproval(ExecutionMode.STRICT)
-        release_approval_id = payload.pop("release_approval_id")
-        rollback_approval_id = payload["approval_id"]
+        self.assertEqual(payload["authorization_source"], "human_approval")
 
         self.assertEqual(
             payload["next_action"],
@@ -2611,7 +2819,12 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     self.assertEqual(cli_main(arguments), 0)
-                approval_ids.append(json.loads(output.getvalue())["approval_id"])
+                recovered = json.loads(output.getvalue())
+                self.assertEqual(
+                    recovered["authorization_source"],
+                    "human_approval",
+                )
+                approval_ids.append(recovered["approval_id"])
             self.assertEqual(approval_ids[0], approval_ids[1])
             self.assertEqual(
                 len(
@@ -2631,6 +2844,10 @@ class ApprovalAwareStatusCliTests(unittest.TestCase):
             )
             with redirect_stdout(output):
                 self.assertEqual(cli_main(different_actor), 0)
+            self.assertEqual(
+                json.loads(output.getvalue())["authorization_source"],
+                "human_approval",
+            )
             self.assertNotEqual(
                 json.loads(output.getvalue())["approval_id"],
                 approval_ids[0],
@@ -3054,7 +3271,10 @@ class CleanupPolicyHandlerTests(unittest.TestCase):
             updated_at="2026-07-16T00:00:00.000000Z",
         )
         ownership = SimpleNamespace(worktree_path=Path("/private/owned-worktree"))
-        store = SimpleNamespace()
+        store = SimpleNamespace(
+            events_path=Path("/private/runtime/events.jsonl"),
+            load=mock.Mock(return_value=state),
+        )
         for contract in (
             SimpleNamespace(mode=ExecutionMode.STRICT),
             None,
@@ -3069,11 +3289,22 @@ class CleanupPolicyHandlerTests(unittest.TestCase):
                         return_value=(SimpleNamespace(), ownership, store),
                     ),
                     mock.patch(
+                        "ship_flow.cli._load_run",
+                        return_value=(ownership, store),
+                    ),
+                    mock.patch(
                         "ship_flow.cli._current_authorization",
                         return_value=contract,
                     ),
                     mock.patch("ship_flow.cli.cleanup_run") as cleanup,
                 ):
+                    cleanup.return_value = SimpleNamespace(
+                        state=replace(
+                            state,
+                            phase=Phase.COMPLETED,
+                            revision=state.revision + 1,
+                        )
+                    )
                     return_code = cli_main(
                         (
                             "cleanup",
@@ -3093,6 +3324,243 @@ class CleanupPolicyHandlerTests(unittest.TestCase):
                     "confirmation_required",
                 )
                 cleanup.assert_not_called()
+
+    def test_autonomous_cleanup_revalidates_live_identity_before_removal(self) -> None:
+        state = RunState(
+            run_id="run-cleanup-policy",
+            phase=Phase.AWAITING_CLEANUP_APPROVAL,
+            revision=7,
+            created_at="2026-07-16T00:00:00.000000Z",
+            updated_at="2026-07-16T00:00:00.000000Z",
+        )
+        repository_path = Path("/private/repository")
+        worktree = Path("/private/owned-worktree")
+        manifest = Manifest(
+            project_name="cleanup-policy",
+            base_branch="main",
+            remote="origin",
+            verification_steps=(
+                CommandSpec("unit", (sys.executable, "-c", "pass"), "unit"),
+            ),
+            release_required=False,
+        )
+        ownership = SimpleNamespace(
+            run_id=state.run_id,
+            primary_checkout=repository_path,
+            worktree_path=worktree,
+            branch="ship/live-branch",
+        )
+        run = SimpleNamespace(state=state, manifest=manifest)
+        store = SimpleNamespace(
+            events_path=Path("/private/runtime/events.jsonl"),
+            load=mock.Mock(return_value=state),
+        )
+        contract = AuthorizationContract(
+            run_id=state.run_id,
+            generation=1,
+            mode=ExecutionMode.AUTONOMOUS,
+            goal="ship cleanup policy fixture",
+            repository=str(repository_path.resolve()),
+            worktree=str(worktree.resolve()),
+            branch="ship/live-branch",
+            manifest_sha256=manifest_digest(manifest),
+            release_target=None,
+            previous_release=None,
+            state_revision=1,
+            created_at="2026-07-16T00:00:00.000000Z",
+        )
+        mismatches = {
+            "run_id": replace(contract, run_id="run-another"),
+            "repository": replace(
+                contract,
+                repository=str(Path("/private/another-repository").resolve()),
+            ),
+            "worktree": replace(
+                contract,
+                worktree=str(Path("/private/another-worktree").resolve()),
+            ),
+            "branch": replace(contract, branch="ship/stale-contract-branch"),
+        }
+        for label, mismatched_contract in mismatches.items():
+            with self.subTest(identity=label):
+                output = io.StringIO()
+                with (
+                    redirect_stdout(output),
+                    mock.patch(
+                        "ship_flow.cli._repository",
+                        return_value=SimpleNamespace(primary_checkout=repository_path),
+                    ),
+                    mock.patch(
+                        "ship_flow.cli._preflight",
+                        return_value=(run, ownership, store),
+                    ),
+                    mock.patch(
+                        "ship_flow.cli._load_run",
+                        return_value=(ownership, store),
+                    ),
+                    mock.patch(
+                        "ship_flow.cli._load_safe_manifest",
+                        return_value=manifest,
+                    ),
+                    mock.patch(
+                        "ship_flow.cli._current_authorization",
+                        return_value=mismatched_contract,
+                    ),
+                    mock.patch("ship_flow.cli.cleanup_run") as cleanup,
+                ):
+                    cleanup.return_value = SimpleNamespace(
+                        state=replace(
+                            state,
+                            phase=Phase.COMPLETED,
+                            revision=state.revision + 1,
+                        )
+                    )
+                    return_code = cli_main(
+                        (
+                            "cleanup",
+                            "--repo",
+                            ".",
+                            "--run-id",
+                            state.run_id,
+                            "--expected-revision",
+                            str(state.revision),
+                            "--json",
+                        )
+                    )
+
+                payload = json.loads(output.getvalue())
+                self.assertEqual(return_code, 4)
+                self.assertEqual(
+                    payload["error"]["code"],
+                    "scope_change_required",
+                )
+                cleanup.assert_not_called()
+
+
+class ExternalScopeChangeRejectionTests(unittest.TestCase):
+    def test_interrupted_and_unknown_external_cycles_reject_scope_change_unchanged(
+        self,
+    ) -> None:
+        release_path = (
+            Phase.PLANNING,
+            Phase.PLAN_REVIEW,
+            Phase.AWAITING_PLAN_APPROVAL,
+            Phase.DEVELOPING,
+            Phase.CODE_REVIEW,
+            Phase.VERIFYING,
+            Phase.AWAITING_RELEASE_APPROVAL,
+            Phase.RELEASING,
+        )
+        rollback_path = (
+            *release_path,
+            Phase.ROLLBACK_PENDING,
+            Phase.ROLLING_BACK,
+        )
+        cases = (
+            ("interrupted-release", release_path),
+            ("unknown-release", (*release_path, Phase.BLOCKED)),
+            ("interrupted-rollback", rollback_path),
+            ("unknown-rollback", (*rollback_path, Phase.BLOCKED)),
+        )
+        for label, transitions in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                run_id = f"run-{label}"
+                store = StateStore(root / "runs" / run_id)
+                state = store.create(run_id)
+                repository_path = root / "repository"
+                worktree = root / "worktree"
+                repository_path.mkdir()
+                worktree.mkdir()
+                authorizations = AuthorizationStore(store)
+                authorizations.create_initial(
+                    mode=ExecutionMode.AUTONOMOUS,
+                    goal="ship the authorized external operation",
+                    repository=repository_path,
+                    worktree=worktree,
+                    branch="ship/external-operation",
+                    manifest_sha256="a" * 64,
+                    release_target="production",
+                    previous_release="release-v1",
+                    state_revision=state.revision,
+                )
+                for phase in transitions:
+                    state = store.transition(phase, expected_revision=state.revision)
+                evidence = store.run_directory / "release-cycles" / f"{label}.json"
+                evidence.parent.mkdir(mode=0o700)
+                evidence.write_text('{"sealed":true}\n', encoding="utf-8")
+                before = {
+                    path.relative_to(store.run_directory): path.read_bytes()
+                    for path in store.run_directory.rglob("*")
+                    if path.is_file()
+                }
+                output = io.StringIO()
+                release_engine = mock.Mock()
+                with (
+                    redirect_stdout(output),
+                    mock.patch("ship_flow.cli._repository", return_value=object()),
+                    mock.patch(
+                        "ship_flow.cli._load_run",
+                        return_value=(
+                            SimpleNamespace(
+                                worktree_path=worktree,
+                                branch="ship/external-operation",
+                            ),
+                            store,
+                        ),
+                    ),
+                    mock.patch(
+                        "ship_flow.cli._release_engine",
+                        return_value=release_engine,
+                    ),
+                ):
+                    return_code = cli_main(
+                        (
+                            "request-scope-change",
+                            "--repo",
+                            ".",
+                            "--run-id",
+                            run_id,
+                            "--expected-revision",
+                            str(state.revision),
+                            "--reason",
+                            "manifest_drift",
+                            "--summary",
+                            "change external operation material",
+                            "--goal",
+                            "ship expanded external operation",
+                            "--manifest-sha256",
+                            "b" * 64,
+                            "--release-target",
+                            "production",
+                            "--previous-release",
+                            "release-v1",
+                            "--json",
+                        )
+                    )
+
+                payload = json.loads(output.getvalue())
+                self.assertNotEqual(return_code, 0)
+                self.assertEqual(payload["error"]["code"], "phase_conflict")
+                after = {
+                    path.relative_to(store.run_directory): path.read_bytes()
+                    for path in store.run_directory.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after, before)
+                self.assertEqual(store.load(), state)
+                self.assertFalse(authorizations.pending_path.exists())
+                self.assertEqual(
+                    list(
+                        (store.run_directory / "authorization" / "requests").glob(
+                            "*.json"
+                        )
+                    ),
+                    [],
+                )
+                release_engine.release.assert_not_called()
+                release_engine.rollback.assert_not_called()
+                release_engine.resume_external_cycle.assert_not_called()
 
 
 class UnknownOperationCliTests(unittest.TestCase):
