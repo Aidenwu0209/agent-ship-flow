@@ -442,6 +442,7 @@ class BeginnerCliFlowTests(unittest.TestCase):
         collect(synced)
         sync_path = evidence_path(synced, "sync")
 
+        cleanup_revision = int(self.state(synced)["revision"])
         cleaned = self.success(
             "cleanup",
             "--repo",
@@ -449,31 +450,93 @@ class BeginnerCliFlowTests(unittest.TestCase):
             "--run-id",
             self.run_id,
             "--expected-revision",
-            str(self.state(synced)["revision"]),
+            str(cleanup_revision),
             "--approved-condition",
             "unmerged",
         )
         collect(cleaned)
-        evidence_path(cleaned, "events")
+        events_path = evidence_path(cleaned, "events")
+        cleanup_completion_path = events_path.with_name(
+            "cleanup-workflow-completed.json"
+        )
+        self.assertTrue(cleanup_completion_path.is_file())
+        cleanup_completion = json.loads(
+            cleanup_completion_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            set(cleanup_completion),
+            {
+                "schema_version",
+                "run_id",
+                "expected_revision",
+                "target_phase",
+                "approved",
+                "approved_conditions",
+                "merged_into",
+                "target_oid",
+                "ownership_record_sha256",
+                "ownership",
+                "stage",
+            },
+        )
+        self.assertEqual(cleanup_completion["schema_version"], 1)
+        self.assertEqual(cleanup_completion["run_id"], self.run_id)
+        self.assertEqual(cleanup_completion["expected_revision"], cleanup_revision)
+        self.assertEqual(cleanup_completion["target_phase"], "COMPLETED")
+        self.assertIs(cleanup_completion["approved"], True)
+        self.assertEqual(cleanup_completion["approved_conditions"], ["unmerged"])
+        self.assertEqual(cleanup_completion["stage"], "completed")
+        self.assertEqual(
+            Path(str(cleanup_completion["ownership"]["worktree_path"])).resolve(),  # type: ignore[index]
+            self.worktree.resolve(),
+        )
         self.assertEqual(self.state(cleaned)["phase"], "COMPLETED")
         self.assertFalse(os.path.lexists(self.worktree))
 
-        actors = {
-            "planner-context",
-            "plan-critic-context",
-            "developer-context",
-            "reviewer-context",
-            "verifier-context",
-            "sync-context",
-        }
-        self.assertEqual(len(actors), 6)
         plan_review = json.loads(plan_review_path.read_text(encoding="utf-8"))
         code_review = json.loads(code_review_path.read_text(encoding="utf-8"))
         verification = json.loads(verification_path.read_text(encoding="utf-8"))
         sync = json.loads(sync_path.read_text(encoding="utf-8"))
+
+        def handoff_for(record: dict[str, object]) -> dict[str, object]:
+            digest = str(record["handoff_nonce_sha256"])
+            handoff_path = events_path.parent / "handoffs" / f"{digest}.json"
+            self.assertTrue(handoff_path.is_file())
+            handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+            self.assertEqual(handoff["run_id"], self.run_id)
+            self.assertEqual(handoff["subject_digest"], record["subject_digest"])
+            return handoff
+
+        plan_handoff = handoff_for(plan_review)
+        code_handoff = handoff_for(code_review)
+        verification_handoff = handoff_for(verification)
+        self.assertEqual(plan_handoff["source_actor"], "planner-context")
+        self.assertEqual(plan_handoff["consumed_by"], "plan-critic-context")
         self.assertEqual(plan_review["reviewer_actor"], "plan-critic-context")
+        self.assertEqual(plan_review["reviewer_actor"], plan_handoff["consumed_by"])
+        self.assertNotEqual(plan_handoff["source_actor"], plan_review["reviewer_actor"])
+        self.assertEqual(code_handoff["source_actor"], "developer-context")
+        self.assertEqual(code_handoff["consumed_by"], "reviewer-context")
         self.assertEqual(code_review["reviewer_actor"], "reviewer-context")
+        self.assertEqual(code_review["reviewer_actor"], code_handoff["consumed_by"])
+        self.assertNotEqual(code_handoff["source_actor"], code_review["reviewer_actor"])
+        self.assertEqual(verification_handoff["source_actor"], "reviewer-context")
+        self.assertEqual(verification_handoff["consumed_by"], "verifier-context")
         self.assertEqual(verification["verifier_actor"], "verifier-context")
+        self.assertEqual(
+            verification["verifier_actor"], verification_handoff["consumed_by"]
+        )
+        self.assertNotEqual(
+            verification_handoff["source_actor"], verification["verifier_actor"]
+        )
+        persisted_actor_chain = (
+            plan_handoff["source_actor"],
+            plan_review["reviewer_actor"],
+            code_handoff["source_actor"],
+            code_review["reviewer_actor"],
+            verification["verifier_actor"],
+        )
+        self.assertEqual(len(set(persisted_actor_chain)), len(persisted_actor_chain))
         self.assertEqual(sync["reporter"], "sync-context")
         self.assertTrue(actions)
         self.assertTrue(all(action["kind"] != "human" for action in actions))
