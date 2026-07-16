@@ -1,82 +1,79 @@
 # Agent Ship Flow
 
+English | [简体中文](README.zh-CN.md)
+
 [![CI](https://github.com/Aidenwu0209/agent-ship-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/Aidenwu0209/agent-ship-flow/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![External runtime dependencies: none](https://img.shields.io/badge/external_runtime_dependencies-none-brightgreen)](pyproject.toml)
 
-Agent Ship Flow is a durable, reviewable end-to-end Git shipping workflow for
-AI agents. It turns “plan → develop → independent review → deterministic
-verification → release → health check → rollback → cleanup” into a recoverable
-state machine.
+> Durable, reviewable Git shipping workflows for AI agents.
 
-中文：这是一个面向多种 AI Agent 的安全交付引擎。它不会因为 Agent
-中断、上下文丢失或外部操作结果未知，就跳过 Review、Verification、人工
-上线确认或回滚证据。
+## Why Agent Ship Flow
 
-## Agent-neutral core
+Agent Ship Flow makes a delivery workflow recoverable instead of relying on an
+agent's chat history. Its standard-library `ship` CLI stores the workflow state,
+evidence, approvals, and operation receipts in the repository. Compatible
+agents can use the same JSON contract, while the included Codex adapter offers
+one ready-made controller.
 
-The core is the standard-library `ship` CLI and its JSON contract. Any agent
-that can execute local commands, retain a repository path and `run-id`, and
-present human gates to a user can integrate with it.
+The engine is intentionally agent-neutral: it needs Python 3.11+, Git, and an
+existing Git repository, but no external runtime dependency or model API.
 
-- **Codex**: the included `skills/ship-flow/` directory is an optional Codex
-  adapter.
-- **Claude, Cursor, OpenCode, or custom agents**: follow the same command and
-  state contract in [the integration guide](docs/agent-integration.md).
-- The engine never assumes that a conversational Agent is the source of truth:
-  it reloads durable state and gives one typed `next_action` at a time.
+## How the flow stays safe
 
-## Safety model
-
-- Every run uses an isolated Git branch and worktree.
-- Planner, Plan Critic, Developer, Reviewer, and Verifier are separate roles.
-- Review and Verification evidence is bound to exact Git and manifest state;
-  changed code makes stale evidence unusable.
-- External operations use durable receipts. `UNKNOWN` outcomes are probed or
-  sent to a human gate, never blindly replayed.
-- Deploy requires a health check that asserts the released candidate/version.
-- Push, merge, release, deploy, data-impacting rollback, and cleanup remain
-  explicit human or engine-authorized actions.
-
-## Quick start
-
-Requirements: Python 3.11+, Git, and an existing Git repository to ship.
-
-```bash
-git clone <your-agent-ship-flow-repository>
-cd agent-ship-flow
-python3 -m pip install -e ".[dev]"
-ship --help
+```mermaid
+flowchart LR
+  P[Plan] --> PC[Independent plan review]
+  PC --> D[Development in an isolated worktree]
+  D --> CR[Independent code review]
+  CR --> V[Deterministic verification]
+  V --> H{Human release approval}
+  H -->|Approved| R[Release and health check]
+  H -->|Not approved| D
+  R --> C[Approved cleanup]
 ```
 
-For a first run, your Agent calls `ship init --repo <absolute-repo-path> --json`.
-It must show the detected manifest and wait for the user to confirm it before
-using `--accept-detected`.
+- The engine binds review and verification evidence to the current Git and
+  manifest state; changed inputs make stale evidence unusable.
+- External operations retain durable receipts. An `UNKNOWN` result is probed or
+  sent to a human decision; it is never blindly replayed.
+- Push, merge, release, deploy, data-impacting rollback, and cleanup remain
+  explicit, current-state actions. The flow does not automatically commit your
+  repository policy.
 
-For an existing run, every Agent turn starts with:
+## Start in the path that fits you
+
+- **Ship a repository with any compatible agent:** follow the [CLI quick
+  start](docs/quickstart.md).
+- **Integrate an agent with the JSON protocol:** read the [agent integration
+  guide](docs/agent-integration.md).
+- **Install the Codex adapter:** use the [Codex adapter quick
+  start](docs/ship-flow-quickstart.md).
+
+For a new repository, run `ship init --repo <absolute-repo-path> --json`, show
+the detected policy, and use `--accept-detected` only after the human confirms
+it. A newly accepted manifest returns the human `commit_manifest` action. The
+user must review `.ship/manifest.toml`, add it, and commit it before `ship
+start`; `ship start` requires a clean base when that policy is enabled.
+
+For an existing run, every later agent turn begins with:
 
 ```bash
 ship status --repo <absolute-repo-path> --run-id <run-id> --json
 ```
 
-Then it follows the returned `next_action`. Do not reconstruct phase from chat
-history or Git alone.
+Read the returned state, evidence status, and complete `next_action`; do not
+reconstruct the workflow from chat history or Git status alone.
 
-## Codex integration
+## Documentation
 
-Codex users can install the included optional adapter from this repository:
+See the [documentation index](docs/README.md) for English and Chinese entry
+points, the [workflow protocol](docs/agent-integration.md) for adapter authors,
+and the [Codex adapter guide](docs/ship-flow-quickstart.md) for installation,
+recovery, release, rollback, and uninstall.
 
-```bash
-python3 scripts/install-codex-skill.py
-```
-
-The installer validates the Skill, pressure-test receipt, unit tests, and
-integration tests before installing the Skill and a self-contained engine under
-`~/.codex/`.
-
-For the portable CLI workflow, see [the Chinese quick start](docs/quickstart-zh.md).
-For Codex installation, recovery, release, rollback, and uninstall, see the
-[Codex adapter quick start](docs/ship-flow-quickstart-zh.md).
-
-## Development and tests
+## Develop and verify
 
 ```bash
 python3 -m pip install -e ".[dev]"
@@ -84,25 +81,13 @@ python3 -m unittest discover -s tests/unit -v
 python3 -m unittest discover -s tests/integration -v
 ruff format --check src/ship_flow tests scripts/install_codex_skill.py scripts/install-codex-skill.py
 ruff check src/ship_flow tests scripts/install_codex_skill.py scripts/install-codex-skill.py
-ship --help
+git diff --check
 ```
 
-GitHub Actions runs this matrix on Python 3.11 and 3.12.
+GitHub Actions runs the supported test matrix on Python 3.11 and 3.12.
 
-## Project layout
+## Contributing, security, and license
 
-- `src/ship_flow/`: agent-neutral engine and `ship` CLI.
-- `docs/agent-integration.md`: integration contract for any Agent.
-- `skills/ship-flow/`: optional Codex adapter.
-- `tests/`: unit, integration, installer, and Skill pressure tests.
-- `AGENTS.md`: concise operating rules for AI contributors.
-
-## Contributing and security
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
-and [SECURITY.md](SECURITY.md) before opening a contribution or reporting a
-vulnerability.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing and
+[SECURITY.md](SECURITY.md) before reporting a vulnerability. Agent Ship Flow is
+available under the [MIT License](LICENSE).

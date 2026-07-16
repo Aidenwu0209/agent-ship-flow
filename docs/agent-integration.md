@@ -14,13 +14,33 @@ An integrating Agent needs to be able to:
 
 No model API, framework, or hosted service is required by the core.
 
-## Turn protocol
+## Confirm and version the manifest
 
-For a new request:
+For a new repository, run `ship init --repo <repo> --json` and surface its
+`confirm_detected_manifest` decision to the human. After the human confirms the
+detected policy, run `ship init --repo <repo> --accept-detected --json`. A new
+manifest returns the human JSON action `commit_manifest` with its path.
+
+Surface `commit_manifest` to the human and stop for the human Git action. The
+integration must not commit the file automatically. The human reviews the
+project policy, then adds and commits the manifest:
 
 ```text
-ship init --repo <repo> --json
-ship start --repo <repo> --run-id <run-id> --expected-revision <revision> ... --json
+git add .ship/manifest.toml
+git commit -m "chore: configure ship flow"
+```
+
+Resume with `ship start` only after the repository is clean. When the confirmed
+manifest requires a clean base, the engine refuses to create a run from a dirty
+base checkout.
+
+## Turn protocol
+
+For a new request, confirm and commit the manifest as described above, then
+start the run with its goal:
+
+```text
+ship start --repo <repo> --run-id <run-id> --goal <goal> --json
 ```
 
 For every later turn of an existing run:

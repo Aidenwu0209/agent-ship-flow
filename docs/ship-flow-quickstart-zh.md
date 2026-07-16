@@ -1,5 +1,7 @@
 # Agent Ship Flow 中文快速入门（Codex 适配器）
 
+[English](ship-flow-quickstart.md)
+
 > Agent Ship Flow 的核心 CLI 和 JSON 协议可被任何能执行本地命令的 Agent
 > 使用；本文介绍随仓库提供的 Codex 适配器。其他 Agent 请先阅读
 > [通用集成说明](agent-integration.md)。
@@ -43,6 +45,10 @@ Codex 先检测 `.ship/manifest.toml`。首次使用时它会请你确认：
 - 回滚命令和是否可能影响数据。
 
 请不要因为“以前这条命令成功过”就确认未检查的 deploy 配置。
+
+首次确认检测到的 manifest 后，返回的 `commit_manifest` 人工操作要求你审阅、暂存并
+提交 `.ship/manifest.toml`。在这份首次 manifest 提交之前，不能开始第一次运行；
+Codex 不会替你自动提交项目策略。
 
 ## 4. 继续中断的运行
 

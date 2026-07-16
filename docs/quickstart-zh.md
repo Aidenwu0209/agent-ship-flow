@@ -1,5 +1,7 @@
 # Agent Ship Flow 中文快速入门
 
+[English](quickstart.md)
+
 这是一份面向所有 Agent 的 CLI 入门，不依赖 Codex、Claude、Cursor 或任何
 模型 API。只要你的 Agent 能执行本地 argv 命令、保存仓库绝对路径与 `run-id`、
 解析 JSON，并把需要人确认的问题展示给用户，就能使用它。
@@ -37,6 +39,18 @@ ship init --repo /absolute/path/to/target-repo --json
 ```bash
 ship init --repo /absolute/path/to/target-repo --accept-detected --json
 ```
+
+接受后，返回的 `commit_manifest` 人工操作表示 Agent 必须停下，让用户审阅
+`.ship/manifest.toml`。这份 manifest 是经过审阅的项目策略；请在启动运行前暂存并
+提交它：
+
+```bash
+git add .ship/manifest.toml
+git commit -m "chore: configure ship flow"
+```
+
+当确认的策略启用干净基础工作树保护时，`ship start` 要求基础工作树干净。请先完成
+或明确处理其他工作树改动，再继续。
 
 随后创建一次有明确目标的运行：
 
