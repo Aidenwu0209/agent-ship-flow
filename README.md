@@ -11,22 +11,21 @@ English | [简体中文](README.zh-CN.md)
 
 ## Why Agent Ship Flow
 
-Agent Ship Flow makes a delivery workflow recoverable instead of relying on an
-agent's chat history. Its standard-library `ship` CLI stores the workflow state,
+Agent Ship Flow makes delivery recoverable instead of relying on chat history.
+Its standard-library `ship` CLI stores workflow state, authorization contracts,
 evidence, approvals, and operation receipts in the repository. Compatible
-agents can use the same JSON contract, while the included Codex adapter offers
-one ready-made controller.
+agents use the same JSON contract; the included Codex adapter is one controller.
 
-The engine is intentionally agent-neutral: it needs Python 3.11+, Git, and an
-existing Git repository, but no external runtime dependency or model API.
+The engine needs Python 3.11+, Git, and an existing Git repository, but no
+external runtime dependency or model API.
 
 | Guarantee | What it means |
 | --- | --- |
-| Isolated worktrees | Development runs in an isolated worktree. |
-| Independent roles | Planner, Plan Critic, Developer, Reviewer, and Verifier remain independent. |
-| Evidence freshness | Review and verification evidence is bound to the current Git and manifest state; changed inputs make it unusable. |
-| Unknown-outcome recovery | An external `UNKNOWN` result is probed or sent for human adjudication; it is never blindly replayed. |
-| Human gates | Push, merge, release, deploy, data-impacting rollback, and cleanup remain explicit human decisions. |
+| Scope-authorized autonomy | New runs default to `autonomous`. The initial goal and current contract authorize every in-contract automatic action; the only ordinary human question is `approve_scope_change`. |
+| Strict compatibility | `--mode strict` preserves plan, release, rollback, and cleanup approvals. A legacy run with no contract also behaves as strict. |
+| Independent roles | Planner, Plan Critic, Developer, Reviewer, and Verifier remain independent in both modes. |
+| Evidence freshness | Review, Verification, release, health, rollback, and cleanup evidence remains subject-bound; changed inputs make it unusable. |
+| Unknown-outcome recovery | An external `UNKNOWN` result is a manual safety block and is never blindly replayed. |
 
 ## How the flow stays safe
 
@@ -36,50 +35,81 @@ flowchart LR
   PC --> D[Development in an isolated worktree]
   D --> CR[Independent code review]
   CR --> V[Deterministic verification]
-  V --> H{Human release approval}
-  H -->|Approved| R[Release and health check]
-  H -->|Not approved| D
-  R --> C[Approved cleanup]
+  V --> S{Inside current contract?}
+  S -->|Yes| R[Contract-authorized release and health check]
+  R --> C[Safe engine-owned cleanup]
+  S -->|No| H[One scope-change decision]
+  H --> P
 ```
 
-- The engine binds review and verification evidence to the current Git and
-  manifest state; changed inputs make stale evidence unusable.
-- External operations retain durable receipts. An `UNKNOWN` result is probed or
-  sent to a human decision; it is never blindly replayed.
-- Push, merge, release, deploy, data-impacting rollback, and cleanup remain
-  explicit, current-state actions. The flow does not automatically commit your
-  repository policy.
+Autonomous mode removes conversational approval stops, not evidence. Contract
+gate receipts use `scope-contract:<contract-digest>`. Automatic cleanup still
+refuses dirty, foreign, unsafe, or otherwise ineligible worktrees. A manual
+`UNKNOWN` state preserves the immutable receipt and waits for a conclusive probe
+or adjudication; it is not treated as permission to retry.
 
-## Start in the path that fits you
+## Start with autonomous mode
 
-- **Ship a repository with any compatible agent:** follow the [CLI quick
-  start](docs/quickstart.md).
-- **Integrate an agent with the JSON protocol:** read the [agent integration
-  guide](docs/agent-integration.md).
-- **Install the Codex adapter:** use the [Codex adapter quick
-  start](docs/ship-flow-quickstart.md).
-
-For a new repository, run `ship init --repo <absolute-repo-path> --json`, show
-the detected policy, and use `--accept-detected` only after the human confirms
-it. A newly accepted manifest returns the human `commit_manifest` action. The
-user must review `.ship/manifest.toml`, add it, and commit it before `ship
-start`; `ship start` requires a clean base when that policy is enabled.
-
-For an existing run, every later agent turn begins with:
+Detect and version the manifest, then start the run. `autonomous` is the default:
 
 ```bash
-ship status --repo <absolute-repo-path> --run-id <run-id> --json
+ship init --repo /absolute/path/to/repo --json
+git add .ship/manifest.toml
+git commit -m "chore: configure ship flow"
+ship start \
+  --repo /absolute/path/to/repo \
+  --run-id run-login-error-001 \
+  --goal "Show an actionable error when login fails" \
+  --release-target production \
+  --previous-release v1 \
+  --json
 ```
 
-Read the returned state, evidence status, and complete `next_action`; do not
-reconstruct the workflow from chat history or Git status alone.
+`init` returns automatic `commit_manifest` in autonomous mode. A controller
+executes that action without asking; the Git commands above show the same
+required commit boundary for a person using the CLI directly.
+
+The run contract binds mode, repository, owned worktree, exact goal, branch,
+manifest digest (verification/release/health/rollback material), release target,
+previous release, generation, creation time, and state revision. Status exposes:
+
+```json
+{"authorization":{"mode":"autonomous","source":"contract","generation":1,"digest":"<sha256>"}}
+```
+
+Every later turn begins with durable status:
+
+```bash
+ship status --repo /absolute/path/to/repo --run-id run-login-error-001 --json
+```
+
+Execute every returned automatic action. Ask only when an autonomous run returns
+`approve_scope_change`; report progress and manual safety blocks as statements.
+
+## Scope change and strict mode
+
+If the original goal covered account export and the user adds a deployment
+dashboard, record the proposed boundary before doing dashboard work:
+
+```bash
+ship request-scope-change --repo /absolute/path/to/repo --run-id run-login-error-001 --expected-revision 12 --reason feature_expansion --summary "add deployment dashboard" --goal "ship account export and a deployment dashboard" --manifest-sha256 <sha256> --release-target production --json
+ship resolve-scope-change --repo /absolute/path/to/repo --run-id run-login-error-001 --expected-revision 13 --decision approve --actor human-owner --json
+```
+
+Approval creates a new contract generation and returns to planning, so evidence
+for the old boundary is not reused. For explicit audit gates, start with one
+strict option:
+
+```bash
+ship start --repo /absolute/path/to/repo --run-id run-audit-001 --goal "Ship the audited change" --mode strict --json
+```
 
 ## Documentation
 
-See the [documentation index](docs/README.md) for English and Chinese entry
-points, the [workflow protocol](docs/agent-integration.md) for adapter authors,
-and the [Codex adapter guide](docs/ship-flow-quickstart.md) for installation,
-recovery, release, rollback, and uninstall.
+- [CLI quick start](docs/quickstart.md)
+- [Agent integration contract](docs/agent-integration.md)
+- [Codex adapter quick start](docs/ship-flow-quickstart.md)
+- [Documentation index](docs/README.md)
 
 ## Develop and verify
 

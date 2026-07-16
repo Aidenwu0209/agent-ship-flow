@@ -28,7 +28,34 @@ SCENARIO_IDS = (
     "SF-05-no-healthcheck",
     "SF-06-release-no-current-evidence",
     "SF-07-interrupted-external-write",
+    "SF-08-scope-expansion",
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+AUTONOMOUS_ACTION_COMMANDS = {
+    "authorize_plan": (
+        "<ship> authorize --gate plan --repo <repo> --run-id <run-id> "
+        "--expected-revision <revision> --json"
+    ),
+    "authorize_release": (
+        "<ship> authorize --gate release --repo <repo> --run-id <run-id> "
+        "--expected-revision <revision> --json"
+    ),
+    "authorize_rollback": (
+        "<ship> authorize --gate rollback --repo <repo> --run-id <run-id> "
+        "--expected-revision <revision> --json"
+    ),
+    "request_scope_change": (
+        "<ship> request-scope-change --repo <repo> --run-id <run-id> "
+        "--expected-revision <revision> --reason <reason> --summary <summary> "
+        "--goal <proposed-goal> --manifest-sha256 <sha256> --json"
+    ),
+    "approve_scope_change": (
+        "<ship> resolve-scope-change --repo <repo> --run-id <run-id> "
+        "--expected-revision <revision> --decision approve --actor <actor> --json"
+    ),
+}
 
 
 def _file_sha256(path: Path) -> str:
@@ -198,6 +225,17 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(InstallError):
             self.fixture.installer().install()
         self.assertFalse(self.fixture.codex_home.exists())
+
+    def test_receipt_requires_all_eight_scenarios(self) -> None:
+        payload = json.loads(self.fixture.receipt.read_text(encoding="utf-8"))
+        payload["scenarios"].pop()
+        self.fixture.receipt.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(InstallError, "exactly eight scenarios"):
+            validate_pressure_receipt(
+                self.fixture.receipt,
+                skill_source=self.fixture.skill,
+                pressure_spec=self.fixture.pressure,
+            )
 
     def test_duplicate_runner_or_non_substring_rationalization_is_rejected(
         self,
@@ -388,6 +426,35 @@ class InstallationTests(unittest.TestCase):
         self.assertIn("fixture ship help", completed.stdout)
         second = self.fixture.installer().install()
         self.assertFalse(second.changed)
+
+    def test_installed_repository_skill_has_autonomous_controller_contract(
+        self,
+    ) -> None:
+        shutil.rmtree(self.fixture.skill)
+        shutil.copytree(PROJECT_ROOT / "skills" / "ship-flow", self.fixture.skill)
+        self.fixture.write_receipt()
+
+        result = self.fixture.installer().install()
+        installed = result.skill_target
+        skill = (installed / "SKILL.md").read_text(encoding="utf-8")
+        workflow = (installed / "references" / "workflow.md").read_text(
+            encoding="utf-8"
+        )
+
+        for required in (
+            "autonomous",
+            "strict",
+            "approve_scope_change",
+            "scope-contract",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, skill)
+        self.assertNotIn("target-bound, expiring human approval", skill)
+        self.assertNotIn("Cleanup is a human gate", skill)
+        for action, command in AUTONOMOUS_ACTION_COMMANDS.items():
+            with self.subTest(action=action):
+                self.assertIn(f"`{action}`", workflow)
+                self.assertIn(f"`{command}`", workflow)
 
     def test_unknown_or_modified_target_is_never_overwritten(self) -> None:
         unknown = self.fixture.codex_home / "skills" / "ship-flow"

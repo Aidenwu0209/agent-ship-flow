@@ -1,6 +1,9 @@
 # Scope-Authorized Autonomy Design
 
 **Status:** Approved
+**Implementation status:** Tasks 1-4 complete; the Task 5 controller and user
+documentation are implemented. Fresh with-Skill pressure validation and the
+whole-branch Task 6 gate remain pending.
 **Date:** 2026-07-16
 
 ## Goal
@@ -144,8 +147,9 @@ changing the accepted manifest material.
 
 Progress updates state what is happening and what evidence changed. They do not
 ask for permission. The beginner-facing template asks for a decision only when
-there is a pending scope change or an exceptional blocked state that has no safe
-automatic continuation.
+there is a pending scope change. An exceptional blocked state with no safe
+automatic continuation is reported as a manual safety block and missing fact,
+not framed as an ordinary approval question.
 
 README and quick-start documentation will show both modes, make autonomous mode
 the normal path, and give one concrete scope-change example.

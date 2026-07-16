@@ -5,93 +5,80 @@ description: "Use when a user wants Codex to implement, continue, review, verify
 
 # Ship Flow
 
-Use the installed Ship Flow engine as the authority for every workflow state and
-next action. The controller makes the workflow understandable for a beginner;
-it does not replace the engine's gates with prose or judgment.
+## Core contract
 
-## Engine
+The initial user goal and current authorization contract are the permission
+boundary. New runs default to `autonomous`; runs started with `--mode strict`
+retain explicit plan, release, rollback, and cleanup gates. A legacy run with no
+contract is always `strict`.
 
-Run the engine only through:
+The contract binds the mode, repository and owned worktree, goal, branch,
+manifest SHA-256 (including verification/release/health/rollback operations),
+release target, previous release, generation, creation time, and state revision.
+Status exposes `authorization.mode`, `source`, `generation`, and `digest`.
+Contract gate
+receipts use actor `scope-contract:<contract-digest>`.
+
+## Engine and durable state
+
+Run only `${CODEX_HOME:-$HOME/.codex}/tools/ship-flow/bin/ship` with an argv
+array. Treat JSON as authoritative; never edit `.ship` state, evidence,
+approvals, receipts, or ownership records.
+
+For an existing run, the first workflow command in every turn is:
 
 ```text
-${CODEX_HOME:-$HOME/.codex}/tools/ship-flow/bin/ship
+<ship> status --repo <repo> --run-id <run-id> --json
 ```
 
-Pass arguments as an argv array, never through a shell-built command. Treat the
-JSON response as authoritative. Do not edit `.ship` state, evidence, approvals,
-operation receipts, or ownership records by hand.
-
-## Start every turn from durable state
-
-For an existing run, the first workflow command in every turn must be:
-
-```text
-${CODEX_HOME:-$HOME/.codex}/tools/ship-flow/bin/ship status --repo <repo> --run-id <run-id> --json
-```
-
-Do this even when the user says where the run stopped. Never infer the phase
-from conversation history, Git alone, a previous Review, or a previous command
-result. If the repository or run ID is missing and cannot be identified without
-guessing, ask only for that first missing value and stop.
-
-For a new run, call `ship init --repo <repo> --json`. When it returns
-`confirm_detected_manifest`, summarize the detected commands, release target,
-health check, and rollback policy, ask the user to confirm or correct them, and
-stop. Use `--accept-detected` only after that explicit confirmation. Then call
-`ship start` with the confirmed goal.
+For a new autonomous run, call `init`, execute its automatic `commit_manifest`
+action, then call `start` with the exact goal and any declared release target or
+previous release. Use `--mode strict` only when explicit audit approvals are
+required.
 
 ## Controller loop
 
-1. Read `state.revision`, `state.phase`, `reason`, `evidence_status`, and the
-   complete `next_action` object from JSON.
-2. If `next_action.kind` is `human` or `manual`, ask exactly the first missing
-   decision or fact. Explain the consequence in plain Chinese. Do not perform a
-   different action in the same turn.
-3. If it is automatic, perform exactly that action with the returned identifiers
-   and current `--expected-revision`. Do not invent or reuse an approval ID,
-   cycle ID, target, failed release ID, previous release, subject, or revision.
-4. Immediately run `status --json` again. Report the new phase, evidence, and
-   next action. Continue automatically only when the user explicitly asked to
-   carry the flow forward and the next action is still automatic and reversible.
-5. On a conflict, recovery error, `UNKNOWN` external effect, or changed subject,
-   stop. Preserve all evidence and present the engine's first required manual
-   adjudication. Never blindly replay an external write.
+1. Read the complete `state`, `reason`, `evidence_status`, `authorization`,
+   optional `scope_change`, and `next_action` objects.
+2. In `autonomous` mode, execute every returned `automatic` action without
+   asking, using its exact IDs and current `--expected-revision`. Progress
+   updates are statements, not permission requests.
+3. Ask an ordinary human question only when `next_action.action` is
+   `approve_scope_change`. State the current/original contract boundary, the
+   exact proposed boundary, and the consequence of approval. Do no expanded
+   work before the decision.
+4. A `manual` `UNKNOWN` external effect is a safety block, not an approval.
+   Preserve its receipt, state the missing fact, and never replay the write.
+5. In `strict` mode, follow the existing human gates in the command map. After
+   every action, read status again.
 
-Use the command mapping in [workflow.md](references/workflow.md). Use the role
-boundaries in [roles.md](references/roles.md).
+Use [workflow.md](references/workflow.md) for exact commands and
+[roles.md](references/roles.md) for actor boundaries.
 
-## Gates that must never be bypassed
+## Evidence and cleanup boundaries
 
-- Planner and Plan Critic must be distinct contexts. A plan approval applies
-  only to the reviewed plan subject.
-- Developer and Reviewer must be distinct contexts. Any candidate/tree/manifest/
-  command change makes later Review or Verification evidence stale as reported
-  by the engine.
-- Verifier runs confirmed commands and records evidence; it never repairs code.
-  A failure returns control to Development and requires a fresh Review.
-- A release requires current Review and Verification evidence plus a current,
-  target-bound, expiring human approval. Do not turn a user's vague "go ahead"
-  into a fabricated approval record.
-- Never deploy when a deploy operation lacks a confirmed health check that
-  asserts the released candidate/version.
-- Rollback uses its own approval and immutable context bound to the failed
-  release and previous release. Never substitute a guessed release ID.
-- Cleanup is a human gate and may remove only engine-owned, clean resources
-  under the approved condition.
-- Never push, merge, release, deploy, rollback, delete a worktree, or resolve an
-  `UNKNOWN` effect unless the current engine state explicitly authorizes that
-  exact action.
+- Planner/Plan Critic, Developer/Reviewer, and Reviewer/Verifier remain
+  separate; a Verifier records evidence and never repairs code.
+- Changed candidate, manifest, command, target, or contract generation makes
+  old evidence unusable. Current Review, Verification, health, and rollback
+  evidence remain mandatory in both modes.
+- Autonomous release and rollback use the current contract, not guessed consent.
+- Automatic cleanup may remove only an engine-owned, clean worktree after all
+  path, ownership, merge/condition, and evidence preflights pass. Dirty,
+  foreign, or unsafe resources are refused.
 
-## Beginner-facing response
-
-Keep the response short and concrete:
+## Scope-change response
 
 ```text
 当前：<phase>（证据：<current/stale/missing 摘要>）
-已完成：<one action, or none>
-需要你确认：<the first human/manual question, if any>
-下一步：<engine next_action>
+已完成：<in-contract progress>
+原始边界：<current contract goal and material>
+拟议扩展：<exact proposed goal and material>
+需要你确认：是否批准这一范围变更？
 ```
 
-Never claim success merely because a command was started. Cite the evidence or
-receipt path returned by the engine when a gate or external operation completes.
+## Common mistakes
+
+- Ask an ad-hoc feature-detail question instead of recording a scope change.
+- Turn a progress update into a permission gate.
+- Treat an `UNKNOWN` safety block as a retry signal.

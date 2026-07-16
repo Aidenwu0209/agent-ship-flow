@@ -1,71 +1,120 @@
 # Integrating Agent Ship Flow with Any Agent
 
-Agent Ship Flow is intentionally split into a deterministic CLI engine and
-optional conversational adapters. The CLI is the portability boundary.
+Agent Ship Flow is split into a deterministic CLI engine and optional
+conversational controllers. The CLI and JSON schema are the portability
+boundary.
 
 ## Minimum capability
 
-An integrating Agent needs to be able to:
+An integrating agent must execute local argv commands without a shell, retain
+an absolute repository path and `run-id`, parse JSON, preserve opaque values,
+and present the exact scope-change decision. No model API or hosted service is
+required by the core.
 
-1. execute a local argv command without invoking a shell;
-2. retain or ask for an absolute repository path and a `run-id`;
-3. parse JSON responses; and
-4. show a user the first required human decision.
+## Authorization contract
 
-No model API, framework, or hosted service is required by the core.
+The initial goal plus current authorization contract are the permission
+boundary. New runs default to `autonomous`; `--mode strict` preserves explicit
+plan, release, rollback, and cleanup gates. Runs with no contract use strict
+compatibility and report `authorization.source=legacy_default`.
 
-## Confirm and version the manifest
+Each contract generation binds mode, canonical repository, engine-owned
+worktree, goal, branch, manifest SHA-256 (verification, release, health-check,
+and rollback material), release target, previous release, generation, creation
+time, and state revision. JSON exposes `authorization.mode`, `source`,
+`generation`, and `digest`. Contract-authorized gate receipts use
+`scope-contract:<contract-digest>`.
 
-For a new repository, run `ship init --repo <repo> --json` and surface its
-`confirm_detected_manifest` decision to the human. After the human confirms the
-detected policy, run `ship init --repo <repo> --accept-detected --json`. A new
-manifest returns the human JSON action `commit_manifest` with its path.
+## Initialize and start
 
-Surface `commit_manifest` to the human and stop for the human Git action. The
-integration must not commit the file automatically. The human reviews the
-project policy, then adds and commits the manifest:
+For the default autonomous path:
 
 ```text
-git add .ship/manifest.toml
-git commit -m "chore: configure ship flow"
+ship init --repo <repo> --json
 ```
 
-Resume with `ship start` only after the repository is clean. When the confirmed
-manifest requires a clean base, the engine refuses to create a run from a dirty
-base checkout.
+The result writes the detected manifest and returns automatic
+`commit_manifest`. Execute that action without asking, but preserve the existing
+Git commit boundary for `.ship/manifest.toml`. Start only from the committed,
+clean policy:
+
+```text
+ship start --repo <repo> --run-id <run-id> --goal <goal> --release-target <target> --previous-release <release> --json
+```
+
+Omit release values only when they are outside the requested workflow. In
+strict initialization, use `init --mode strict`; surface
+`confirm_detected_manifest`, then use `--accept-detected` only after that
+decision.
 
 ## Turn protocol
 
-For a new request, confirm and commit the manifest as described above, then
-start the run with its goal:
-
-```text
-ship start --repo <repo> --run-id <run-id> --goal <goal> --json
-```
-
-For every later turn of an existing run:
+Every later turn begins with:
 
 ```text
 ship status --repo <repo> --run-id <run-id> --json
 ```
 
-Read `state`, `evidence_status`, and the entire `next_action` object. If the
-action is automatic, execute only that action with the returned IDs and current
-revision, then call `status` again. If it is human or manual, ask exactly that
-question and stop.
+Read the complete `state`, `reason`, `evidence_status`, `authorization`, optional
+`scope_change`, and `next_action` objects.
 
-## Adapter rules
+- In autonomous mode, execute every `automatic` action with the returned IDs
+  and current `--expected-revision`; do not ask permission first.
+- Ask an ordinary question only for `approve_scope_change`. Present the
+  current/original boundary, exact proposal, and consequence.
+- Report progress as statements.
+- A `manual` `UNKNOWN` state is a safety block. Preserve its receipt, report the
+  missing fact, and never replay the external write.
+- In strict or legacy mode, surface the existing human gates one at a time.
 
-- Never write `.ship` state, evidence, approvals, receipts, or ownership
-  records directly.
-- Do not make raw Git status a substitute for engine status.
-- Preserve opaque IDs verbatim. Do not generate replacements.
-- Keep external-effect approval, health checking, unknown-outcome handling,
-  and cleanup in the engine's state machine.
-- Convert engine output into the host Agent's UX, but do not weaken its gate.
+Read status again after every mutation. Never generate replacement IDs, infer a
+phase from chat/Git, or edit `.ship` state directly.
 
-## Existing adapters
+## Automatic authorization commands
+
+Map policy actions exactly:
+
+```text
+authorize_plan     -> ship authorize --gate plan --repo <repo> --run-id <run-id> --expected-revision <revision> --json
+authorize_release  -> ship authorize --gate release --repo <repo> --run-id <run-id> --expected-revision <revision> --json
+authorize_rollback -> ship authorize --gate rollback --repo <repo> --run-id <run-id> --expected-revision <revision> --json
+```
+
+Do not add an actor to `authorize`. The engine derives the current contract
+actor and validates evidence, target, failed-release context, and generation.
+
+## Scope-change protocol
+
+Before adding an objective, changing a target/resource, or altering accepted
+manifest material, create a durable request:
+
+```text
+ship request-scope-change --repo <repo> --run-id <run-id> --expected-revision <revision> --reason <reason> --summary <summary> --goal <proposed-goal> --manifest-sha256 <sha256> --json
+```
+
+Include proposed release/previous-release values when applicable. The only
+ordinary autonomous human action is then resolved with:
+
+```text
+ship resolve-scope-change --repo <repo> --run-id <run-id> --expected-revision <revision> --decision approve --actor <actor> --json
+```
+
+Approval appends a contract generation and returns to `PLANNING`; rejection
+keeps the current generation. Neither decision reuses old evidence for a changed
+subject.
+
+## Evidence, roles, and cleanup
+
+Autonomy never merges Planner/Plan Critic, Developer/Reviewer, or
+Reviewer/Verifier. Current Review, Verification, health, rollback, immutable
+receipt, and stale-evidence checks remain mandatory.
+
+Automatic cleanup calls the same preflight as strict cleanup and may remove only
+an engine-owned, clean worktree whose path, ownership, merge/approved condition,
+and evidence checks pass. Refuse dirty, foreign, or unsafe resources.
+
+## Existing adapter
 
 `skills/ship-flow/` is the Codex adapter. Other hosts can implement equivalent
-thin adapters by following this document and `AGENTS.md`; they do not need to
-import Codex-specific code.
+thin controllers from this contract; they do not need to import Codex-specific
+code.

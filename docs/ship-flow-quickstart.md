@@ -2,69 +2,107 @@
 
 English | [简体中文](ship-flow-quickstart-zh.md)
 
-> The core CLI and JSON protocol work with any local-command agent. If you do
-> not use Codex, follow the [agent integration guide](agent-integration.md).
+> The core CLI and JSON protocol work with any local-command agent. Other
+> controllers should follow the [agent integration guide](agent-integration.md).
 
 ## 1. Install the Codex adapter
 
-From the Agent Ship Flow source repository, with Python 3.11+ and Git
-available, run:
+From this repository, with Python 3.11+ and Git available:
 
 ```bash
 python3 scripts/install-codex-skill.py
-```
-
-Confirm the installation:
-
-```bash
 ~/.codex/tools/ship-flow/bin/ship --help
 ```
 
-If installation is interrupted, do not delete its transaction log by hand.
-Correct the disk-space or permission issue and run the same installer again so
-it can validate and recover the known transaction.
+If installation is interrupted, fix the disk-space or permission issue and run
+the same installer again. Do not delete its transaction log; recovery validates
+the known staged and installed trees.
 
-## 2. Start the first task
+## 2. Start in autonomous mode
 
-In a Codex task for the target Git repository, ask:
+New runs default to `autonomous`. Give Codex the complete initial boundary,
+including any release target and rollback version you intend to authorize:
 
 ```text
-Use $ship-flow to implement “Show an actionable error when login fails”, complete development, independent Review, and Verification, then stop before formal release approval.
+Use $ship-flow to implement “Show an actionable error when login fails”, independently review and verify it, release this exact candidate to production if all evidence passes, verify health, and safely clean up the engine-owned worktree. The previous release is v1.
 ```
 
-The adapter detects `.ship/manifest.toml` and asks one question at a time about
-the base branch, commands, release target, health check, and rollback policy.
-After you confirm the detected policy, it accepts the manifest and returns the
-human `commit_manifest` action. Review, add, and commit that first manifest
-before `ship start`; the adapter must not commit it automatically.
+The initial goal and authorization contract are the permission boundary. Codex
+executes every returned automatic action without asking, including contract
+authorization for plan/release/rollback and eligible cleanup. Progress updates
+are statements.
 
-## 3. Answer one human gate at a time
+Autonomous `init` returns automatic `commit_manifest`. Codex must commit that
+exact generated policy before `start`, but does not ask for a second approval.
+The contract binds mode, repository/worktree, goal, branch, manifest digest,
+release target, previous release, generation, creation time, and state revision.
+Status exposes `authorization.mode`, `source`, `generation`, and `digest`; gate
+receipts use
+`scope-contract:<contract-digest>`.
 
-The controller presents only the first missing decision. It never treats “go
-ahead” as permission to fabricate a release approval, and it does not bypass a
-failed Review or Verification. Release approval remains bound to the current
-target and evidence; cleanup is also a human gate.
+## 3. Resume from durable status
 
-For an existing run, provide its repository path and `run-id`. Every later turn
-starts from durable state:
+For an existing run, give Codex its repository path and `run-id`. Every turn
+starts with:
 
 ```bash
 ~/.codex/tools/ship-flow/bin/ship status --repo /absolute/repo --run-id run-login-001 --json
 ```
 
-## 4. Handle `UNKNOWN` outcomes safely
+Codex follows the complete `next_action`, then reads status again. Independent
+Plan Critic, Reviewer, and Verifier contexts remain required. Changed code,
+manifest material, target, or contract generation makes old evidence unusable.
 
-An interrupted external operation can be `UNKNOWN`: neither success nor
-failure. Preserve its receipt. Use a reliable read-only probe when available,
-or make the engine's requested human adjudication; never rerun the external
-write blindly.
+## 4. Approve only a recorded scope expansion
 
-## 5. Uninstall
+If the current contract covers account export and you ask for a deployment
+dashboard, Codex first reports completed in-contract progress and records the
+original and proposed boundaries:
+
+```bash
+~/.codex/tools/ship-flow/bin/ship request-scope-change --repo /absolute/repo --run-id run-login-001 --expected-revision 12 --reason feature_expansion --summary "add deployment dashboard" --goal "ship account export and a deployment dashboard" --manifest-sha256 <sha256> --release-target production --json
+```
+
+Only the returned `approve_scope_change` action becomes an ordinary question.
+After you approve the exact proposal, Codex runs:
+
+```bash
+~/.codex/tools/ship-flow/bin/ship resolve-scope-change --repo /absolute/repo --run-id run-login-001 --expected-revision 13 --decision approve --actor human-owner --json
+```
+
+The new contract generation returns to planning, so prior evidence is not reused
+for the expanded task. Codex must not replace this record with an ad-hoc question
+about dashboard details.
+
+## 5. Use strict mode for explicit audit gates
+
+Ask for strict mode when plan, release, rollback, and cleanup must each stop for
+human approval:
+
+```text
+Use $ship-flow in --mode strict to ship “Update the audited billing rule”.
+```
+
+Strict initialization also preserves detected-manifest confirmation. Existing
+runs with no contract use strict compatibility automatically and report
+`authorization.source=legacy_default`.
+
+## 6. Handle `UNKNOWN` and cleanup safely
+
+A manual `UNKNOWN` external result is a safety block, not a permission prompt.
+Codex preserves its receipt and states the missing fact; it uses a reliable
+read-only probe or the engine's adjudication path and never replays the write.
+
+Automatic cleanup removes only an engine-owned, clean worktree after path,
+ownership, merge/approved-condition, and evidence checks pass. Dirty, foreign,
+or unsafe resources are refused. The adapter never gains credentials or bypasses
+Codex's own platform permissions.
+
+## 7. Uninstall
 
 ```bash
 python3 scripts/install-codex-skill.py --uninstall
 ```
 
-The uninstaller removes only Ship Flow-owned directories whose recorded
-contents still match. If you changed an installation directory, it refuses to
-delete it until you back it up or explicitly resolve the mismatch.
+The uninstaller removes only Ship Flow-owned directories whose recorded content
+still matches. It refuses modified or replaced installation paths.

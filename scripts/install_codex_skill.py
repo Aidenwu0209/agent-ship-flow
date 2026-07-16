@@ -27,6 +27,7 @@ SCENARIO_IDS = (
     "SF-05-no-healthcheck",
     "SF-06-release-no-current-evidence",
     "SF-07-interrupted-external-write",
+    "SF-08-scope-expansion",
 )
 _HEX_256 = re.compile(r"[0-9a-f]{64}\Z")
 _RUNNER_ID = re.compile(r"/?[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
@@ -318,7 +319,7 @@ def validate_pressure_receipt(
         raise InstallError("pressure receipt is for a different scenario spec")
     scenarios = payload["scenarios"]
     if not isinstance(scenarios, list) or len(scenarios) != len(SCENARIO_IDS):
-        raise InstallError("pressure receipt must contain exactly seven scenarios")
+        raise InstallError("pressure receipt must contain exactly eight scenarios")
     seen_runners: set[str] = set()
     seen_transcripts: set[Path] = set()
     seen_ids: list[str] = []

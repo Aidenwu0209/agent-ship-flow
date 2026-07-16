@@ -3,12 +3,12 @@
 English | [简体中文](quickstart-zh.md)
 
 This guide works with any agent that can execute local argv commands, retain an
-absolute repository path and `run-id`, parse JSON, and show human decisions.
+absolute repository path and `run-id`, parse JSON, and present one scope-change
+decision. New runs use scope-authorized `autonomous` mode by default.
 
 ## 1. Install the CLI
 
-Agent Ship Flow requires Python 3.11+, Git, and an existing Git repository to
-ship. Install the CLI from a checkout of this repository:
+Agent Ship Flow requires Python 3.11+, Git, and an existing Git repository:
 
 ```bash
 git clone https://github.com/Aidenwu0209/agent-ship-flow.git
@@ -17,61 +17,53 @@ python3 -m pip install -e .
 ship --help
 ```
 
-Use `python3 -m pip install -e ".[dev]"` instead when developing this project.
+Use `python3 -m pip install -e ".[dev]"` when developing this project.
 
-## 2. Detect the repository policy
-
-Ask the agent to inspect the target repository. It must show the detected base
-branch, commands, release target, health check, and rollback policy before a
-human confirms them.
+## 2. Initialize the default autonomous policy
 
 ```bash
 ship init --repo /absolute/path/to/target-repo --json
 ```
 
-## 3. Confirm the detected policy
-
-Only after that human confirmation, accept the detected policy:
-
-```bash
-ship init --repo /absolute/path/to/target-repo --accept-detected --json
-```
-
-The accepted result returns the human `commit_manifest` action. Review
-`.ship/manifest.toml` as project policy; do not let the agent commit it for you.
-
-## 4. Review and version the manifest
-
-Add and commit the reviewed manifest in the target repository:
+Autonomous initialization writes the detected manifest and returns automatic
+`commit_manifest`. A controller executes that action without asking. When using
+the CLI directly, inspect and cross the same Git commit boundary yourself:
 
 ```bash
 git add .ship/manifest.toml
 git commit -m "chore: configure ship flow"
 ```
 
-`ship start` requires a clean base when the confirmed policy enables that
-protection. Finish or deliberately resolve any other working-tree changes
-before starting the run.
+The manifest still defines the base branch, verification commands, release
+target, health check, and rollback operations. It must be committed before the
+run starts; autonomous mode removes a second conversation, not this boundary.
 
-## 5. Start the run
-
-Create a run only after the manifest commit:
+## 3. Start and inspect the authorization contract
 
 ```bash
 ship start \
   --repo /absolute/path/to/target-repo \
   --run-id run-login-error-001 \
   --goal "Show an actionable error when login fails" \
+  --release-target production \
+  --previous-release v1 \
   --json
 ```
 
-The engine creates an isolated worktree and returns the next action. Keep the
-returned `run-id`; do not replace it with a new value.
+The immutable contract generation binds:
 
-## 6. Resume every later turn from status
+- execution mode;
+- canonical repository and engine-owned worktree;
+- exact user goal and branch;
+- manifest SHA-256, including verification, release, health, and rollback
+  material;
+- release target and previous release; and
+- contract generation, creation time, and bound state revision.
 
-Begin every later agent turn with the durable state, even after a restart or
-lost context:
+The response exposes `authorization.mode`, `source`, `generation`, and `digest`.
+Preserve the returned `run-id` and opaque values exactly.
+
+## 4. Drive every turn from status
 
 ```bash
 ship status \
@@ -80,9 +72,63 @@ ship status \
   --json
 ```
 
-Follow the returned `state`, `evidence_status`, and complete `next_action`.
-When the action is human or manual, ask only that first question and stop.
+Use `state`, `evidence_status`, `authorization`, optional `scope_change`, and the
+complete `next_action`:
 
-For Codex, install the optional adapter with the [Codex adapter quick
-start](ship-flow-quickstart.md). Adapter authors should use the [JSON protocol
-guide](agent-integration.md).
+- execute every `automatic` action with its current revision and IDs, then read
+  status again;
+- in autonomous mode, ask only for `approve_scope_change`;
+- report progress as a statement, never as a permission request; and
+- treat a manual `UNKNOWN` result as a safety block and never replay the write.
+
+Independent Plan Review, Code Review, Verification, release health evidence,
+rollback verification, and stale-evidence rejection remain mandatory.
+
+## 5. Record an expansion before doing it
+
+Suppose the current goal covers account export and the user adds a deployment
+dashboard. Preserve both boundaries and request the expansion first:
+
+```bash
+ship request-scope-change \
+  --repo /absolute/path/to/target-repo \
+  --run-id run-login-error-001 \
+  --expected-revision 12 \
+  --reason feature_expansion \
+  --summary "add deployment dashboard" \
+  --goal "ship account export and a deployment dashboard" \
+  --manifest-sha256 <sha256> \
+  --release-target production \
+  --json
+```
+
+When the returned action is `approve_scope_change`, show the original boundary,
+the exact proposal, and the consequence. After approval:
+
+```bash
+ship resolve-scope-change --repo /absolute/path/to/target-repo --run-id run-login-error-001 --expected-revision 13 --decision approve --actor human-owner --json
+```
+
+Approval creates the next contract generation and returns to planning; rejection
+keeps the current generation.
+
+## 6. Select strict mode when required
+
+Strict mode retains detected-manifest confirmation plus plan, release, rollback,
+and cleanup approvals:
+
+```bash
+ship start --repo /absolute/path/to/target-repo --run-id run-audit-001 --goal "Ship the audited change" --mode strict --json
+```
+
+Runs created before authorization contracts also report
+`authorization.source=legacy_default` and follow this strict behavior.
+
+## 7. Cleanup remains bounded
+
+Autonomous cleanup can remove only the engine-owned, clean worktree after path,
+ownership, merge/approved-condition, and evidence checks pass. Dirty, foreign,
+or unsafe resources are refused in both modes.
+
+For Codex, continue with the [Codex adapter quick start](ship-flow-quickstart.md).
+Adapter authors should use the [JSON protocol guide](agent-integration.md).
