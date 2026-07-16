@@ -32,7 +32,7 @@
 
 **Interfaces:**
 - Consumes: `StateStore`, `FileLock`, `_atomic_write_private_json`, `_read_bounded_private_file`, `_remove_private_file`, `manifest_digest`.
-- Produces: `ExecutionMode`, `AuthorizationContract`, `ScopeChangeRequest`, `AuthorizationStore.create_initial()`, `AuthorizationStore.current()`, `AuthorizationStore.mode()`, `AuthorizationStore.request_change()`, and `AuthorizationStore.resolve_change()`.
+- Produces: `ExecutionMode`, `AuthorizationContract`, `ScopeChangeRequest`, `ScopeChangeResolution`, `AuthorizationStore.create_initial()`, `AuthorizationStore.current()`, `AuthorizationStore.mode()`, `AuthorizationStore.request_change()`, and `AuthorizationStore.resolve_change()`.
 
 - [ ] **Step 1: Write failing model and persistence tests**
 
@@ -113,12 +113,26 @@ class ScopeChangeRequest:
     requested_at: str
     gate_revision: int
     schema_version: int = 1
+
+
+@dataclass(frozen=True)
+class ScopeChangeResolution:
+    resolution_id: str
+    request_id: str
+    run_id: str
+    decision: str
+    actor: str
+    previous_contract_digest: str
+    resulting_contract_digest: str
+    resolved_at: str
+    gate_revision: int
+    schema_version: int = 1
 ```
 
 `AuthorizationContract` must implement `to_dict(self) -> dict[str, object]`,
 `from_dict(cls, value: Mapping[str, object]) -> AuthorizationContract`, and
-`digest(self) -> str`. `ScopeChangeRequest` must implement the corresponding
-`to_dict`, `from_dict`, and `digest` methods.
+`digest(self) -> str`. `ScopeChangeRequest` and `ScopeChangeResolution` must
+implement the corresponding `to_dict`, `from_dict`, and `digest` methods.
 
 `AuthorizationStore` must expose these complete signatures:
 
@@ -127,14 +141,18 @@ class ScopeChangeRequest:
 - `current(self) -> AuthorizationContract | None`
 - `mode(self) -> ExecutionMode`
 - `pending(self) -> ScopeChangeRequest | None`
+- `latest_resolution(self) -> ScopeChangeResolution | None`
 - `request_change(self, *, reason: str, summary: str, proposed_goal: str, proposed_manifest_sha256: str, proposed_release_target: str | None, proposed_previous_release: str | None, expected_revision: int) -> ScopeChangeRequest`
 - `resolve_change(self, *, decision: str, actor: str, expected_revision: int) -> AuthorizationContract`
 
 Use canonical JSON and SHA-256. Store immutable generations at
 `authorization/contracts/0001-<digest>.json`, a replaceable `current.json`
 pointer containing the exact generation and digest, and one replaceable
-`pending-scope-change.json`. Use the existing private-file helpers and a
-run-local `authorization.lock`.
+`pending-scope-change.json`. Every approve/reject decision writes an immutable
+`authorization/resolutions/<request-id>-<resolution-id>.json` binding the
+request, actor, decision, previous contract, resulting contract, and gate
+revision before the pending pointer is removed. Use the existing private-file
+helpers and a run-local `authorization.lock`.
 
 - [ ] **Step 4: Add and test the scope-change phase**
 
@@ -166,6 +184,8 @@ expanded = authorizations.resolve_change(
 self.assertEqual(expanded.generation, 2)
 self.assertEqual(store.load().phase, Phase.PLANNING)
 self.assertIsNone(authorizations.pending())
+self.assertEqual(authorizations.latest_resolution().decision, "approve")
+self.assertEqual(authorizations.latest_resolution().actor, "human-owner")
 ```
 
 For `decision="reject"`, retain generation 1, return it, clear the pending
@@ -486,7 +506,7 @@ git commit -m "test: cover scope-authorized autonomy"
 - Modify: `docs/ship-flow-quickstart-zh.md`
 - Modify: `docs/agent-integration.md`
 - Modify: `docs/superpowers/specs/2026-07-16-scope-authorized-autonomy-design.md`
-- Create: `docs/superpowers/plans/2026-07-16-scope-authorized-autonomy.md`
+- Modify: `docs/superpowers/plans/2026-07-16-scope-authorized-autonomy.md`
 - Modify: `tests/unit/test_installer.py`
 
 **Interfaces:**
