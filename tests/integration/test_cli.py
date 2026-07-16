@@ -181,6 +181,512 @@ class BeginnerCliFlowTests(unittest.TestCase):
         self.assertEqual(self.state(approved)["phase"], "DEVELOPING")
         return started, int(self.state(approved)["revision"])
 
+    def write_release_acceptance_manifest(self, project_name: str) -> None:
+        write_manifest(
+            self.primary / ".ship" / "manifest.toml",
+            Manifest(
+                project_name=project_name,
+                base_branch="main",
+                remote="origin",
+                verification_steps=(
+                    CommandSpec("unit", (sys.executable, "-c", "pass"), "unit"),
+                ),
+                release_required=True,
+                release_steps=(
+                    OperationSpec(
+                        name="release-acceptance-sentinel",
+                        kind="deploy",
+                        target="production",
+                        argv=(
+                            sys.executable,
+                            "-c",
+                            (
+                                "from pathlib import Path; import sys; "
+                                "Path(sys.argv[1]).write_text('released\\n')"
+                            ),
+                            str(self.sentinel),
+                        ),
+                        effect="external_write",
+                        idempotency="safe",
+                    ),
+                ),
+                release_healthchecks=(
+                    CommandSpec(
+                        "production-health",
+                        (
+                            sys.executable,
+                            "-c",
+                            (
+                                "import json,subprocess; "
+                                "version=subprocess.check_output(("
+                                "'git','rev-parse','HEAD'),text=True).strip(); "
+                                "print(json.dumps({'schema_version':1,"
+                                "'kind':'health','status':'healthy',"
+                                "'target':'production','version':version},"
+                                "sort_keys=True,separators=(',',':')))"
+                            ),
+                        ),
+                        "health",
+                    ),
+                ),
+            ),
+        )
+        git(self.primary, "add", ".ship/manifest.toml")
+        git(self.primary, "commit", "-m", f"confirm {project_name} manifest")
+
+    def test_default_autonomous_flow_crosses_every_boundary_without_human_action(
+        self,
+    ) -> None:
+        self.write_release_acceptance_manifest("autonomous-acceptance")
+
+        actions: list[dict[str, object]] = []
+
+        def collect(payload: dict[str, object]) -> dict[str, object]:
+            action = payload["next_action"]
+            self.assertIsInstance(action, dict)
+            actions.append(action)  # type: ignore[arg-type]
+            return action  # type: ignore[return-value]
+
+        def evidence_path(payload: dict[str, object], name: str) -> Path:
+            evidence = payload["evidence"]
+            self.assertIsInstance(evidence, dict)
+            path = Path(str(evidence[name]))  # type: ignore[index]
+            self.assertTrue(path.exists(), msg=f"missing {name} evidence: {path}")
+            return path
+
+        started = self.success(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "ship the requested feature within the recorded scope",
+            "--branch",
+            "ship/autonomous-acceptance",
+            "--worktree",
+            str(self.worktree),
+            "--release-target",
+            "production",
+        )
+        collect(started)
+        self.assertEqual(started["authorization"]["mode"], "autonomous")  # type: ignore[index]
+
+        plan_source = self.root / "autonomous acceptance plan.md"
+        plan_source.write_text(
+            "# Plan\n\nImplement, independently review, verify, release, and sync.\n",
+            encoding="utf-8",
+        )
+        planned = self.success(
+            "set-plan",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(started)["revision"]),
+            "--file",
+            str(plan_source),
+        )
+        collect(planned)
+        evidence_path(planned, "plan")
+
+        plan_reviewed = self.success(
+            "record-plan-review",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(planned)["revision"]),
+            "--source-actor",
+            "planner-context",
+            "--reviewer",
+            "plan-critic-context",
+            "--verdict",
+            "pass",
+        )
+        collect(plan_reviewed)
+        plan_review_path = evidence_path(plan_reviewed, "review")
+
+        plan_authorized = self.success(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(plan_reviewed)["revision"]),
+            "--gate",
+            "plan",
+        )
+        collect(plan_authorized)
+        evidence_path(plan_authorized, "approval")
+
+        (self.worktree / "feature.txt").write_text(
+            "autonomous acceptance\n",
+            encoding="utf-8",
+        )
+        ready = self.success(
+            "development-ready",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(plan_authorized)["revision"]),
+            "--message",
+            "implement autonomous acceptance feature",
+            "--approved-path",
+            "feature.txt",
+        )
+        collect(ready)
+
+        reviewed = self.success(
+            "record-review",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(ready)["revision"]),
+            "--source-actor",
+            "developer-context",
+            "--reviewer",
+            "reviewer-context",
+            "--verdict",
+            "pass",
+        )
+        collect(reviewed)
+        code_review_path = evidence_path(reviewed, "review")
+
+        verified = self.success(
+            "verify",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(reviewed)["revision"]),
+            "--source-actor",
+            "reviewer-context",
+            "--verifier",
+            "verifier-context",
+        )
+        collect(verified)
+        verification_path = evidence_path(verified, "verification")
+        evidence_path(verified, "logs")
+
+        release_authorized = self.success(
+            "authorize",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(verified)["revision"]),
+            "--gate",
+            "release",
+        )
+        release_action = collect(release_authorized)
+        evidence_path(release_authorized, "approval")
+
+        released = self.success(
+            "release",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(release_authorized)["revision"]),
+            "--target",
+            str(release_action["target"]),
+            "--approval-id",
+            str(release_action["approval_id"]),
+        )
+        collect(released)
+        release_path = evidence_path(released, "release")
+        self.assertEqual(self.sentinel.read_text(encoding="utf-8"), "released\n")
+        self.assertTrue(any(release_path.rglob("*.json")))
+
+        synced = self.success(
+            "record-sync",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(released)["revision"]),
+            "--report-json",
+            json.dumps(
+                {
+                    "reporter": "sync-context",
+                    "items": [
+                        {
+                            "category": "code",
+                            "status": "current",
+                            "paths": ["feature.txt"],
+                        }
+                    ]
+                    + [
+                        {
+                            "category": category,
+                            "status": "not_applicable",
+                            "paths": [],
+                        }
+                        for category in ("docs", "rules", "project_knowledge")
+                    ],
+                }
+            ),
+        )
+        collect(synced)
+        sync_path = evidence_path(synced, "sync")
+
+        cleaned = self.success(
+            "cleanup",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(synced)["revision"]),
+            "--approved-condition",
+            "unmerged",
+        )
+        collect(cleaned)
+        evidence_path(cleaned, "events")
+        self.assertEqual(self.state(cleaned)["phase"], "COMPLETED")
+        self.assertFalse(os.path.lexists(self.worktree))
+
+        actors = {
+            "planner-context",
+            "plan-critic-context",
+            "developer-context",
+            "reviewer-context",
+            "verifier-context",
+            "sync-context",
+        }
+        self.assertEqual(len(actors), 6)
+        plan_review = json.loads(plan_review_path.read_text(encoding="utf-8"))
+        code_review = json.loads(code_review_path.read_text(encoding="utf-8"))
+        verification = json.loads(verification_path.read_text(encoding="utf-8"))
+        sync = json.loads(sync_path.read_text(encoding="utf-8"))
+        self.assertEqual(plan_review["reviewer_actor"], "plan-critic-context")
+        self.assertEqual(code_review["reviewer_actor"], "reviewer-context")
+        self.assertEqual(verification["verifier_actor"], "verifier-context")
+        self.assertEqual(sync["reporter"], "sync-context")
+        self.assertTrue(actions)
+        self.assertTrue(all(action["kind"] != "human" for action in actions))
+
+    def test_strict_and_legacy_flows_preserve_exact_human_gates(self) -> None:
+        self.write_release_acceptance_manifest("strict-acceptance")
+        human_actions: list[str] = []
+
+        def collect(payload: dict[str, object]) -> dict[str, object]:
+            action = payload["next_action"]
+            self.assertIsInstance(action, dict)
+            if action["kind"] == "human":  # type: ignore[index]
+                human_actions.append(str(action["action"]))  # type: ignore[index]
+            return action  # type: ignore[return-value]
+
+        started = self.success(
+            "start",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--goal",
+            "ship with explicit compatibility gates",
+            "--branch",
+            "ship/strict-acceptance",
+            "--worktree",
+            str(self.worktree),
+            "--release-target",
+            "production",
+            "--mode",
+            "strict",
+        )
+        collect(started)
+        self.assertEqual(started["authorization"]["mode"], "strict")  # type: ignore[index]
+
+        plan_source = self.root / "strict acceptance plan.md"
+        plan_source.write_text(
+            "# Plan\n\nImplement, review, verify, release, and sync explicitly.\n",
+            encoding="utf-8",
+        )
+        planned = self.success(
+            "set-plan",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(started)["revision"]),
+            "--file",
+            str(plan_source),
+        )
+        collect(planned)
+        plan_reviewed = self.success(
+            "record-plan-review",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(planned)["revision"]),
+            "--source-actor",
+            "strict-planner-context",
+            "--reviewer",
+            "strict-plan-critic-context",
+            "--verdict",
+            "pass",
+        )
+        collect(plan_reviewed)
+        plan_approved = self.success(
+            "approve",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(plan_reviewed)["revision"]),
+            "--gate",
+            "plan",
+            "--actor",
+            "strict-human-owner",
+        )
+        collect(plan_approved)
+
+        (self.worktree / "feature.txt").write_text(
+            "strict acceptance\n",
+            encoding="utf-8",
+        )
+        ready = self.success(
+            "development-ready",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(plan_approved)["revision"]),
+            "--message",
+            "implement strict acceptance feature",
+            "--approved-path",
+            "feature.txt",
+        )
+        collect(ready)
+        reviewed = self.success(
+            "record-review",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(ready)["revision"]),
+            "--source-actor",
+            "strict-developer-context",
+            "--reviewer",
+            "strict-reviewer-context",
+            "--verdict",
+            "pass",
+        )
+        collect(reviewed)
+        verified = self.success(
+            "verify",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(reviewed)["revision"]),
+            "--source-actor",
+            "strict-reviewer-context",
+            "--verifier",
+            "strict-verifier-context",
+        )
+        collect(verified)
+        release_approved = self.success(
+            "approve",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(verified)["revision"]),
+            "--gate",
+            "release",
+            "--actor",
+            "strict-human-owner",
+            "--target",
+            "production",
+        )
+        release_action = collect(release_approved)
+        released = self.success(
+            "release",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(release_approved)["revision"]),
+            "--target",
+            "production",
+            "--approval-id",
+            str(release_action["approval_id"]),
+        )
+        collect(released)
+        synced = self.success(
+            "record-sync",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(released)["revision"]),
+            "--report-json",
+            json.dumps(
+                {
+                    "reporter": "strict-sync-context",
+                    "items": [
+                        {
+                            "category": "code",
+                            "status": "current",
+                            "paths": ["feature.txt"],
+                        }
+                    ]
+                    + [
+                        {
+                            "category": category,
+                            "status": "not_applicable",
+                            "paths": [],
+                        }
+                        for category in ("docs", "rules", "project_knowledge")
+                    ],
+                }
+            ),
+        )
+        collect(synced)
+        cleaned = self.success(
+            "cleanup",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+            "--expected-revision",
+            str(self.state(synced)["revision"]),
+            "--approve",
+            "--approved-condition",
+            "unmerged",
+        )
+        collect(cleaned)
+
+        self.assertEqual(
+            human_actions,
+            ["approve_plan", "approve_release", "approve_cleanup"],
+        )
+        self.assertEqual(self.state(cleaned)["phase"], "COMPLETED")
+        self.assertFalse(os.path.lexists(self.worktree))
+
     def test_beginner_flow_reaches_release_gate_without_external_effects(self) -> None:
         initialized = self.success(
             "init",
@@ -810,6 +1316,44 @@ class BeginnerCliFlowTests(unittest.TestCase):
                 "source": "legacy_default",
                 "generation": None,
                 "digest": None,
+            },
+        )
+        planned = set_plan(
+            repository,
+            self.run_id,
+            "# Plan\n\nPreserve every legacy approval gate.\n",
+            expected_revision=started.state.revision,
+        )
+        assert planned.subject is not None
+        nonce = issue_handoff(
+            planned.store,
+            subject=planned.subject,
+            source_actor="legacy-planner-context",
+            role=ReviewRole.PLAN_CRITIC,
+        )
+        record_plan_review(
+            planned.store,
+            current_subject=planned.subject,
+            reviewer_actor="legacy-plan-critic-context",
+            handoff_nonce=nonce,
+            verdict="pass",
+            findings=(),
+        )
+
+        gated = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+        self.assertEqual(gated["authorization"], status["authorization"])
+        self.assertEqual(
+            gated["next_action"],
+            {
+                "phase": "AWAITING_PLAN_APPROVAL",
+                "kind": "human",
+                "action": "approve_plan",
             },
         )
 

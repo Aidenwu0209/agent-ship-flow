@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ship_flow import release as release_module
+from ship_flow.authorization import AuthorizationStore, ExecutionMode
+from ship_flow.cli import _policy_aware_next_action
 from ship_flow.manifest import CommandSpec, Manifest, OperationSpec, manifest_digest
 from ship_flow.model import Phase
 from ship_flow.release import (
@@ -3548,6 +3550,52 @@ class ReleaseOperationRecoveryTests(unittest.TestCase):
 
             self.assertEqual((root / "external-counter").read_text(), "1")
             self.assertEqual(store.load().phase, Phase.BLOCKED)
+
+    def test_autonomous_unknown_effect_never_replays_release_or_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (
+                repo,
+                _,
+                store,
+                manifest,
+                _,
+                _,
+                engine,
+            ) = self._unknown_fixture(root)
+            authorizations = AuthorizationStore(store)
+            contract = authorizations.create_initial(
+                mode=ExecutionMode.AUTONOMOUS,
+                goal="ship the authorized release",
+                repository=repo,
+                worktree=repo,
+                branch="main",
+                manifest_sha256=manifest_digest(manifest),
+                release_target="production",
+                previous_release=None,
+                state_revision=store.load().revision,
+            )
+            runner = CountingRunner()
+            engine.runner = runner
+
+            for _ in range(2):
+                with self.assertRaises(ReleaseRecoveryError):
+                    engine.reconcile_operation(target="production")
+
+            self.assertEqual(
+                _policy_aware_next_action(
+                    store.load(),
+                    authorizations=authorizations,
+                    contract=contract,
+                ),
+                {
+                    "phase": "BLOCKED",
+                    "kind": "manual",
+                    "action": "manual_reconciliation",
+                },
+            )
+            self.assertEqual(runner.calls, 0)
+            self.assertEqual((root / "external-counter").read_text(), "1")
 
 
 class ReleaseHealthAndLockTests(unittest.TestCase):

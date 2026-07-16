@@ -15,6 +15,8 @@ from unittest import mock
 from ship_flow import gitops as gitops_module
 from ship_flow import reconcile as reconcile_module
 from ship_flow import release as release_module
+from ship_flow.authorization import AuthorizationStore, ExecutionMode
+from ship_flow.cli import _policy_aware_next_action
 from ship_flow.gitops import (
     CandidateCommitPartialError,
     GitRepository,
@@ -1096,6 +1098,18 @@ class PlanApprovalTests(unittest.TestCase):
 
     def test_unknown_operation_receipt_blocks_and_reason_survives_restart(self) -> None:
         subject = self.prepare_release_gate()
+        authorizations = AuthorizationStore(self.store)
+        contract = authorizations.create_initial(
+            mode=ExecutionMode.AUTONOMOUS,
+            goal="ship the authorized release",
+            repository=self.primary,
+            worktree=self.ownership.worktree_path,
+            branch=self.ownership.branch,
+            manifest_sha256=manifest_digest(self.manifest),
+            release_target="production",
+            previous_release=None,
+            state_revision=self.store.load().revision,
+        )
         prepared_at = "2026-07-15T00:00:00Z"
         common = {
             "run_id": "run-plan-001",
@@ -1177,6 +1191,18 @@ class PlanApprovalTests(unittest.TestCase):
         self.assertEqual(blocked.reason, "external-operation-unknown")
         self.assertEqual(restarted.reason, "external-operation-unknown")
         self.assertEqual(next_action(restarted).kind, "manual")
+        self.assertEqual(
+            _policy_aware_next_action(
+                restarted,
+                authorizations=authorizations,
+                contract=contract,
+            ),
+            {
+                "phase": "BLOCKED",
+                "kind": "manual",
+                "action": "manual_reconciliation",
+            },
+        )
 
 
 class PreGateReconciliationTests(unittest.TestCase):
