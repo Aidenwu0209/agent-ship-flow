@@ -95,6 +95,12 @@ revision, so a stale approval cannot authorize a different expansion.
 The existing evidence phases remain. Only the routing after current evidence
 changes by policy.
 
+For compatibility, the implementation may retain the existing awaiting phases
+as durable internal checkpoints in the event WAL. In autonomous mode those
+checkpoints emit an automatic contract-authorization action and are crossed
+without a conversational stop. The table below describes the user-visible
+transition; it does not require deleting recovery-safe intermediate records.
+
 | Current evidence boundary | `autonomous` transition | `strict` transition |
 | --- | --- | --- |
 | plan critic passes | `PLAN_REVIEW -> DEVELOPING` | `PLAN_REVIEW -> AWAITING_PLAN_APPROVAL -> DEVELOPING` |
@@ -148,9 +154,13 @@ the normal path, and give one concrete scope-change example.
 
 The state schema remains readable. Per-run policy and contract records are
 additive. A missing policy record means `strict`, preserving the behavior and
-approval receipts of already-created runs. New evidence records include an
-authorization-source discriminator (`contract` or `human_approval`) so recovery
-can validate either path without weakening subject, target, or revision checks.
+approval receipts of already-created runs. Contract-authorized gate receipts
+use the existing actor binding with the exact form
+`scope-contract:<contract-digest>` and surface `authorization_source=contract`
+in CLI output. Human approvals retain their existing actor binding and surface
+`authorization_source=human_approval`. Recovery can therefore distinguish and
+validate either path without changing old receipt schemas or weakening subject,
+target, or revision checks.
 
 The old approval commands remain available for strict runs. They reject use in
 autonomous mode unless the run is currently handling a scope-change request.
