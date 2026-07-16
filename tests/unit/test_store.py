@@ -80,6 +80,27 @@ class StateModelTests(unittest.TestCase):
             Phase.CANCELLED: set(),
         }
 
+        scope_sources = {
+            Phase.INITIALIZED,
+            Phase.PLANNING,
+            Phase.PLAN_REVIEW,
+            Phase.AWAITING_PLAN_APPROVAL,
+            Phase.DEVELOPING,
+            Phase.CODE_REVIEW,
+            Phase.VERIFYING,
+            Phase.AWAITING_RELEASE_APPROVAL,
+            Phase.RELEASING,
+            Phase.POST_RELEASE_VERIFYING,
+            Phase.ROLLBACK_PENDING,
+            Phase.ROLLING_BACK,
+            Phase.ROLLBACK_VERIFYING,
+            Phase.SYNCING,
+            Phase.AWAITING_CLEANUP_APPROVAL,
+        }
+        for phase in scope_sources:
+            expected[phase].add(Phase.AWAITING_SCOPE_APPROVAL)
+        expected[Phase.AWAITING_SCOPE_APPROVAL] = {Phase.PLANNING}
+
         self.assertEqual(
             {phase: set(targets) for phase, targets in LEGAL_TRANSITIONS.items()},
             expected,
@@ -791,9 +812,10 @@ class FileLockTests(unittest.TestCase):
             locks = (
                 FileLock.repository(common_directory),
                 FileLock.run(run_directory),
+                FileLock.authorization(run_directory),
                 FileLock.release_target(common_directory, "production/us-east"),
             )
-            self.assertEqual(len({lock.path for lock in locks}), 3)
+            self.assertEqual(len({lock.path for lock in locks}), 4)
 
             for lock in locks:
                 lock.acquire()

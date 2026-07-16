@@ -791,6 +791,14 @@ class FileLock:
         )
 
     @classmethod
+    def authorization(cls, run_directory: Path | str) -> "FileLock":
+        directory = Path(run_directory)
+        return cls(
+            directory / "authorization.lock",
+            private_root=_run_private_root(directory),
+        )
+
+    @classmethod
     def release_target(
         cls, git_common_directory: Path | str, target: str
     ) -> "FileLock":

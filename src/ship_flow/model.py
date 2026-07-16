@@ -26,6 +26,7 @@ class Phase(str, Enum):
     ROLLED_BACK = "ROLLED_BACK"
     SYNCING = "SYNCING"
     AWAITING_CLEANUP_APPROVAL = "AWAITING_CLEANUP_APPROVAL"
+    AWAITING_SCOPE_APPROVAL = "AWAITING_SCOPE_APPROVAL"
     COMPLETED = "COMPLETED"
     BLOCKED = "BLOCKED"
     CANCELLED = "CANCELLED"
@@ -41,41 +42,93 @@ class OperationStatus(str, Enum):
 
 LEGAL_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
     {
-        Phase.INITIALIZED: frozenset({Phase.PLANNING, Phase.BLOCKED}),
-        Phase.PLANNING: frozenset({Phase.PLAN_REVIEW, Phase.BLOCKED}),
-        Phase.PLAN_REVIEW: frozenset(
-            {Phase.AWAITING_PLAN_APPROVAL, Phase.PLANNING, Phase.BLOCKED}
+        Phase.INITIALIZED: frozenset(
+            {Phase.PLANNING, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
         ),
-        Phase.AWAITING_PLAN_APPROVAL: frozenset({Phase.DEVELOPING, Phase.CANCELLED}),
-        Phase.DEVELOPING: frozenset({Phase.CODE_REVIEW, Phase.BLOCKED}),
+        Phase.PLANNING: frozenset(
+            {Phase.PLAN_REVIEW, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.PLAN_REVIEW: frozenset(
+            {
+                Phase.AWAITING_PLAN_APPROVAL,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.PLANNING,
+                Phase.BLOCKED,
+            }
+        ),
+        Phase.AWAITING_PLAN_APPROVAL: frozenset(
+            {Phase.DEVELOPING, Phase.AWAITING_SCOPE_APPROVAL, Phase.CANCELLED}
+        ),
+        Phase.DEVELOPING: frozenset(
+            {Phase.CODE_REVIEW, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
         Phase.CODE_REVIEW: frozenset(
-            {Phase.VERIFYING, Phase.DEVELOPING, Phase.BLOCKED}
+            {
+                Phase.VERIFYING,
+                Phase.DEVELOPING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
         ),
         Phase.VERIFYING: frozenset(
-            {Phase.AWAITING_RELEASE_APPROVAL, Phase.DEVELOPING, Phase.BLOCKED}
+            {
+                Phase.AWAITING_RELEASE_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
         ),
         Phase.AWAITING_RELEASE_APPROVAL: frozenset(
-            {Phase.RELEASING, Phase.BLOCKED, Phase.CANCELLED}
+            {
+                Phase.RELEASING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+                Phase.CANCELLED,
+            }
         ),
         Phase.RELEASING: frozenset(
-            {Phase.POST_RELEASE_VERIFYING, Phase.ROLLBACK_PENDING, Phase.BLOCKED}
+            {
+                Phase.POST_RELEASE_VERIFYING,
+                Phase.ROLLBACK_PENDING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
         ),
         Phase.POST_RELEASE_VERIFYING: frozenset(
             {
                 Phase.SYNCING,
                 Phase.ROLLBACK_PENDING,
                 Phase.ROLLING_BACK,
+                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
-        Phase.ROLLBACK_PENDING: frozenset({Phase.ROLLING_BACK, Phase.BLOCKED}),
-        Phase.ROLLING_BACK: frozenset({Phase.ROLLBACK_VERIFYING, Phase.BLOCKED}),
-        Phase.ROLLBACK_VERIFYING: frozenset({Phase.ROLLED_BACK, Phase.BLOCKED}),
+        Phase.ROLLBACK_PENDING: frozenset(
+            {Phase.ROLLING_BACK, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.ROLLING_BACK: frozenset(
+            {
+                Phase.ROLLBACK_VERIFYING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
+        ),
+        Phase.ROLLBACK_VERIFYING: frozenset(
+            {Phase.ROLLED_BACK, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
         Phase.ROLLED_BACK: frozenset(),
         Phase.SYNCING: frozenset(
-            {Phase.AWAITING_CLEANUP_APPROVAL, Phase.DEVELOPING, Phase.BLOCKED}
+            {
+                Phase.AWAITING_CLEANUP_APPROVAL,
+                Phase.DEVELOPING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
         ),
-        Phase.AWAITING_CLEANUP_APPROVAL: frozenset({Phase.COMPLETED, Phase.BLOCKED}),
+        Phase.AWAITING_CLEANUP_APPROVAL: frozenset(
+            {Phase.COMPLETED, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.AWAITING_SCOPE_APPROVAL: frozenset({Phase.PLANNING}),
         Phase.COMPLETED: frozenset(),
         Phase.BLOCKED: frozenset(),
         Phase.CANCELLED: frozenset(),
@@ -86,15 +139,36 @@ LEGAL_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
 RECONCILIATION_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
     {
         **{phase: frozenset() for phase in Phase},
-        Phase.PLAN_REVIEW: frozenset({Phase.PLANNING, Phase.BLOCKED}),
-        Phase.AWAITING_PLAN_APPROVAL: frozenset({Phase.PLANNING, Phase.BLOCKED}),
-        Phase.DEVELOPING: frozenset({Phase.PLANNING, Phase.CODE_REVIEW, Phase.BLOCKED}),
-        Phase.CODE_REVIEW: frozenset({Phase.PLANNING, Phase.DEVELOPING, Phase.BLOCKED}),
+        Phase.INITIALIZED: frozenset({Phase.AWAITING_SCOPE_APPROVAL}),
+        Phase.PLANNING: frozenset({Phase.AWAITING_SCOPE_APPROVAL}),
+        Phase.PLAN_REVIEW: frozenset(
+            {Phase.PLANNING, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.AWAITING_PLAN_APPROVAL: frozenset(
+            {Phase.PLANNING, Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.DEVELOPING: frozenset(
+            {
+                Phase.PLANNING,
+                Phase.CODE_REVIEW,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
+        ),
+        Phase.CODE_REVIEW: frozenset(
+            {
+                Phase.PLANNING,
+                Phase.DEVELOPING,
+                Phase.AWAITING_SCOPE_APPROVAL,
+                Phase.BLOCKED,
+            }
+        ),
         Phase.VERIFYING: frozenset(
             {
                 Phase.PLANNING,
                 Phase.DEVELOPING,
                 Phase.CODE_REVIEW,
+                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
@@ -104,19 +178,27 @@ RECONCILIATION_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
                 Phase.DEVELOPING,
                 Phase.CODE_REVIEW,
                 Phase.SYNCING,
+                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
-        Phase.RELEASING: frozenset({Phase.BLOCKED}),
-        Phase.POST_RELEASE_VERIFYING: frozenset({Phase.BLOCKED}),
-        Phase.ROLLBACK_PENDING: frozenset({Phase.BLOCKED}),
-        Phase.ROLLING_BACK: frozenset({Phase.BLOCKED}),
-        Phase.ROLLBACK_VERIFYING: frozenset({Phase.BLOCKED}),
+        Phase.RELEASING: frozenset({Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}),
+        Phase.POST_RELEASE_VERIFYING: frozenset(
+            {Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.ROLLBACK_PENDING: frozenset(
+            {Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
+        Phase.ROLLING_BACK: frozenset({Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}),
+        Phase.ROLLBACK_VERIFYING: frozenset(
+            {Phase.AWAITING_SCOPE_APPROVAL, Phase.BLOCKED}
+        ),
         Phase.SYNCING: frozenset(
             {
                 Phase.PLANNING,
                 Phase.DEVELOPING,
                 Phase.CODE_REVIEW,
+                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
@@ -126,9 +208,11 @@ RECONCILIATION_TRANSITIONS: Mapping[Phase, frozenset[Phase]] = MappingProxyType(
                 Phase.DEVELOPING,
                 Phase.CODE_REVIEW,
                 Phase.SYNCING,
+                Phase.AWAITING_SCOPE_APPROVAL,
                 Phase.BLOCKED,
             }
         ),
+        Phase.AWAITING_SCOPE_APPROVAL: frozenset({Phase.PLANNING}),
     }
 )
 
