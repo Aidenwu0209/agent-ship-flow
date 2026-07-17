@@ -762,6 +762,64 @@ class AuthorizationStore:
         with self._locked():
             return self._pending_locked()
 
+    def recover_pending_transition(self) -> ScopeChangeRequest | None:
+        """Finish only a fully published scope request's missing state CAS."""
+
+        with self._locked():
+            state = self.store.load()
+            pending = self._pending_locked()
+            if pending is None:
+                return None
+            if (
+                state.phase is Phase.AWAITING_SCOPE_APPROVAL
+                and state.revision == pending.gate_revision + 1
+            ):
+                return pending
+            if state.revision > pending.gate_revision:
+                return self._reconcile_orphan_pending_locked(pending, state=state)
+            if state.revision < pending.gate_revision:
+                raise StateCorruptionError(
+                    "pending scope-change request is ahead of run state"
+                )
+            contract = self._load_contract(
+                generation=pending.contract_generation,
+                digest=pending.contract_digest,
+            )
+            current = self._current_locked()
+            if (
+                contract.run_id != state.run_id
+                or current is None
+                or current != contract
+            ):
+                raise StateCorruptionError(
+                    "pending scope-change request does not bind the current contract"
+                )
+            if Phase.AWAITING_SCOPE_APPROVAL not in LEGAL_TRANSITIONS[state.phase]:
+                raise InvalidTransitionError(
+                    f"cannot transition from {state.phase.value} "
+                    f"to {Phase.AWAITING_SCOPE_APPROVAL.value}"
+                )
+            try:
+                self.store.reconcile_transition(
+                    Phase.AWAITING_SCOPE_APPROVAL,
+                    expected_revision=pending.gate_revision,
+                    reason="scope-request-publication-recovered",
+                )
+            except StaleRevisionError as error:
+                current_state = self.store.load()
+                if (
+                    current_state.phase is Phase.AWAITING_SCOPE_APPROVAL
+                    and current_state.revision == pending.gate_revision + 1
+                ):
+                    return pending
+                if current_state.revision > pending.gate_revision:
+                    return self._reconcile_orphan_pending_locked(
+                        pending,
+                        state=current_state,
+                    )
+                raise error
+            return pending
+
     def _resolutions_locked(self) -> tuple[ScopeChangeResolution, ...]:
         try:
             names = _private_directory_names(

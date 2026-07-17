@@ -531,6 +531,99 @@ class AuthorizationStoreTests(unittest.TestCase):
         self.assertEqual(restarted.pending(), request)
         self.assertEqual(restarted_store.load(), awaiting)
 
+    def test_restart_recovery_is_exact_and_idempotent(self) -> None:
+        self._create_initial()
+        before_state = self.store.load()
+        before_events = self.store.events()
+
+        self.assertIsNone(self.authorizations.recover_pending_transition())
+        self.assertEqual(self.store.load(), before_state)
+        self.assertEqual(self.store.events(), before_events)
+
+        request = self._request_change()
+        awaiting = self.store.load()
+        awaiting_events = self.store.events()
+        restarted = AuthorizationStore(StateStore(self.run_directory))
+
+        self.assertEqual(restarted.recover_pending_transition(), request)
+        self.assertEqual(self.store.load(), awaiting)
+        self.assertEqual(self.store.events(), awaiting_events)
+
+    def test_restart_recovery_removes_only_a_superseded_orphan(self) -> None:
+        orphan = self._leave_orphan_pending_after_interrupted_stale_cas()
+        orphan_archive = self._request_archive_path(orphan)
+        superseding_state = self.store.load()
+        superseding_events = self.store.events()
+        restarted = AuthorizationStore(StateStore(self.run_directory))
+
+        self.assertIsNone(restarted.recover_pending_transition())
+
+        self.assertEqual(self.store.load(), superseding_state)
+        self.assertEqual(self.store.events(), superseding_events)
+        self.assertIsNone(restarted.pending())
+        self.assertTrue(orphan_archive.is_file())
+
+    def test_restart_recovery_rejects_external_phase_without_mutation(self) -> None:
+        contract = self._create_initial()
+        state = self.store.load()
+        for phase in (
+            Phase.PLANNING,
+            Phase.PLAN_REVIEW,
+            Phase.AWAITING_PLAN_APPROVAL,
+            Phase.DEVELOPING,
+            Phase.CODE_REVIEW,
+            Phase.VERIFYING,
+            Phase.AWAITING_RELEASE_APPROVAL,
+            Phase.RELEASING,
+        ):
+            state = self.store.transition(phase, expected_revision=state.revision)
+        request = self._request_with_identity(
+            ScopeChangeRequest(
+                request_id="0" * 64,
+                run_id=state.run_id,
+                contract_digest=contract.digest(),
+                contract_generation=contract.generation,
+                reason="manifest_drift",
+                summary="verification command changed during release",
+                proposed_goal=contract.goal,
+                proposed_manifest_sha256="b" * 64,
+                proposed_release_target=contract.release_target,
+                proposed_previous_release=contract.previous_release,
+                requested_at="2026-07-17T00:00:00.000000Z",
+                gate_revision=state.revision,
+            )
+        )
+        authorization_module._atomic_write_private_json(
+            self._request_archive_path(request),
+            request.to_dict(),
+            trusted_root=self.store.trusted_root,
+            immutable=True,
+        )
+        authorization_module._atomic_write_private_json(
+            self.authorizations.pending_path,
+            request.to_dict(),
+            trusted_root=self.store.trusted_root,
+        )
+        before = {
+            path.relative_to(self.run_directory): path.read_bytes()
+            for path in self.run_directory.rglob("*")
+            if path.is_file()
+        }
+
+        with self.assertRaises(InvalidTransitionError):
+            AuthorizationStore(
+                StateStore(self.run_directory)
+            ).recover_pending_transition()
+
+        after = {
+            path.relative_to(self.run_directory): path.read_bytes()
+            for path in self.run_directory.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+        self.assertEqual(self.store.load(), state)
+        self.assertEqual(self.authorizations.pending(), request)
+
     def test_restart_does_not_clear_orphan_with_missing_contract(self) -> None:
         orphan = self._leave_orphan_pending_after_interrupted_stale_cas()
         invalid = self._request_with_identity(
@@ -867,9 +960,18 @@ class AuthorizationStoreTests(unittest.TestCase):
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        before_state = self.store.load()
+        before_events = self.store.events()
 
         with self.assertRaises(StateCorruptionError):
             self.authorizations.pending()
+        with self.assertRaises(StateCorruptionError):
+            AuthorizationStore(
+                StateStore(self.run_directory)
+            ).recover_pending_transition()
+
+        self.assertEqual(self.store.load(), before_state)
+        self.assertEqual(self.store.events(), before_events)
 
     def test_resolution_rejects_stale_revision_and_invalid_decision(self) -> None:
         self._create_initial()

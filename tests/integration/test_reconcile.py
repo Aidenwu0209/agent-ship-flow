@@ -1206,6 +1206,96 @@ class PlanApprovalTests(unittest.TestCase):
 
 
 class PreGateReconciliationTests(unittest.TestCase):
+    def test_reconcile_recovers_pending_scope_publication_before_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary = root / "repo"
+            initialize_repository(primary)
+            manifest = Manifest(
+                project_name="fixture",
+                base_branch="main",
+                remote="origin",
+                verification_steps=(
+                    CommandSpec(
+                        "unit",
+                        (sys.executable, "-c", "pass"),
+                        "unit",
+                    ),
+                ),
+                release_required=False,
+            )
+            write_manifest(primary / ".ship" / "manifest.toml", manifest)
+            git(primary, "add", ".ship/manifest.toml")
+            git(primary, "commit", "-m", "add manifest")
+            repository = GitRepository.discover(primary)
+            ownership = create_run_worktree(
+                repository,
+                run_id="run-scope-restart",
+                branch="ship/scope-restart",
+                worktree_path=root / "worktree",
+            )
+            store = StateStore(ownership.record_path.parent)
+            state = store.create("run-scope-restart")
+            state = store.transition(Phase.PLANNING, expected_revision=state.revision)
+            authorizations = AuthorizationStore(store)
+            contract = authorizations.create_initial(
+                mode=ExecutionMode.AUTONOMOUS,
+                goal="ship the requested change",
+                repository=ownership.primary_checkout,
+                worktree=ownership.worktree_path,
+                branch=ownership.branch,
+                manifest_sha256=manifest_digest(manifest),
+                release_target=None,
+                previous_release=None,
+                state_revision=state.revision,
+            )
+
+            def stop_after_pending_publication(
+                next_phase: Phase | str,
+                *,
+                expected_revision: int,
+            ) -> object:
+                self.assertEqual(next_phase, Phase.AWAITING_SCOPE_APPROVAL)
+                self.assertEqual(expected_revision, state.revision)
+                self.assertTrue(authorizations.pending_path.is_file())
+                raise OSError("simulated process stop after pending publication")
+
+            with mock.patch.object(
+                store,
+                "transition",
+                side_effect=stop_after_pending_publication,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated process stop"):
+                    authorizations.request_change(
+                        reason="manifest_drift",
+                        summary="verification command changed",
+                        proposed_goal=contract.goal,
+                        proposed_manifest_sha256="b" * 64,
+                        proposed_release_target=contract.release_target,
+                        proposed_previous_release=contract.previous_release,
+                        expected_revision=state.revision,
+                    )
+            request = authorizations.pending()
+            assert request is not None
+            self.assertEqual(store.load(), state)
+
+            recovered = Reconciler(repository).reconcile("run-scope-restart")
+
+            self.assertEqual(recovered.state.phase, Phase.AWAITING_SCOPE_APPROVAL)
+            self.assertEqual(recovered.state.revision, request.gate_revision + 1)
+            self.assertEqual(recovered.reason, "state-is-current")
+            self.assertEqual(store.events()[-1].event_type, "phase.reconciled")
+            self.assertEqual(
+                store.events()[-1].reconciliation_reason,
+                "scope-request-publication-recovered",
+            )
+            self.assertEqual(
+                AuthorizationStore(StateStore(ownership.record_path.parent)).pending(),
+                request,
+            )
+            self.assertEqual(next_action(recovered).kind, "human")
+            self.assertEqual(next_action(recovered).action, "approve_scope_change")
+
     def test_initialized_and_planning_status_do_not_require_a_plan_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

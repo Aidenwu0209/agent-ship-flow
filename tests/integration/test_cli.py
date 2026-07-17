@@ -18,6 +18,7 @@ from ship_flow.authorization import (
     AuthorizationContract,
     AuthorizationStore,
     ExecutionMode,
+    ScopeChangeRequest,
 )
 from ship_flow.cli import _approval_aware_next_action, main as cli_main
 from ship_flow.gitops import GitRepository, commit_candidate
@@ -1685,6 +1686,114 @@ class BeginnerCliFlowTests(unittest.TestCase):
         self.assertEqual(
             rejected["authorization"]["digest"],  # type: ignore[index]
             started["authorization"]["digest"],  # type: ignore[index]
+        )
+
+    def test_status_recovers_pending_scope_publication_after_process_restart(
+        self,
+    ) -> None:
+        _, revision = self.start_developing()
+        repository = GitRepository.discover(self.primary)
+        run_directory = (
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        store = StateStore(run_directory)
+        authorizations = AuthorizationStore(store)
+        contract = authorizations.current()
+        assert contract is not None
+        manifest_sha256 = manifest_digest(
+            load_manifest(self.worktree / ".ship" / "manifest.toml")
+        )
+        published_request: ScopeChangeRequest | None = None
+
+        def stop_after_pending_publication(
+            next_phase: Phase | str,
+            *,
+            expected_revision: int,
+        ) -> object:
+            nonlocal published_request
+            self.assertEqual(next_phase, Phase.AWAITING_SCOPE_APPROVAL)
+            self.assertEqual(expected_revision, revision)
+            published_request = ScopeChangeRequest.from_dict(
+                json.loads(authorizations.pending_path.read_text(encoding="utf-8"))
+            )
+            self.assertTrue(
+                (
+                    run_directory
+                    / "authorization"
+                    / "requests"
+                    / f"{published_request.request_id}.json"
+                ).is_file()
+            )
+            raise OSError("simulated process stop before scope phase transition")
+
+        with mock.patch.object(
+            store,
+            "transition",
+            side_effect=stop_after_pending_publication,
+        ):
+            with self.assertRaisesRegex(OSError, "simulated process stop"):
+                authorizations.request_change(
+                    reason="feature_expansion",
+                    summary="add deployment dashboard",
+                    proposed_goal="ship the feature and deployment dashboard",
+                    proposed_manifest_sha256=manifest_sha256,
+                    proposed_release_target="production",
+                    proposed_previous_release=None,
+                    expected_revision=revision,
+                )
+
+        assert published_request is not None
+        self.assertEqual(store.load().phase, Phase.DEVELOPING)
+        self.assertEqual(store.load().revision, published_request.gate_revision)
+        restarted_store = StateStore(run_directory)
+        self.assertEqual(
+            AuthorizationStore(restarted_store).pending(),
+            published_request,
+        )
+
+        status = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+
+        self.assertEqual(self.state(status)["phase"], "AWAITING_SCOPE_APPROVAL")
+        self.assertEqual(
+            self.state(status)["revision"],
+            published_request.gate_revision + 1,
+        )
+        self.assertEqual(
+            status["next_action"],
+            {
+                "phase": "AWAITING_SCOPE_APPROVAL",
+                "kind": "human",
+                "action": "approve_scope_change",
+                "request_id": published_request.request_id,
+            },
+        )
+        self.assertEqual(
+            status["scope_change"]["request_id"],  # type: ignore[index]
+            published_request.request_id,
+        )
+        self.assertNotEqual(status["next_action"]["action"], "develop")  # type: ignore[index]
+        recovered_state = restarted_store.load()
+        events_after_recovery = restarted_store.events_path.read_bytes()
+
+        repeated = self.success(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            self.run_id,
+        )
+
+        self.assertEqual(repeated["next_action"], status["next_action"])
+        self.assertEqual(restarted_store.load(), recovered_state)
+        self.assertEqual(
+            restarted_store.events_path.read_bytes(),
+            events_after_recovery,
         )
 
     def test_manifest_drift_status_is_read_only_and_requests_scope_change(

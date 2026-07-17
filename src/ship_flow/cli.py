@@ -737,6 +737,8 @@ def _handle_status(args: argparse.Namespace) -> dict[str, object]:
         if isinstance(repository, GitRepository)
         else None
     )
+    if store is not None:
+        AuthorizationStore(store).recover_pending_transition()
     contract = _current_authorization(store) if store is not None else None
     if contract is not None and store is not None:
         state = store.load()

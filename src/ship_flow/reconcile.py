@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Mapping
 
+from .authorization import AuthorizationStore
 from .gitops import (
     GitRepository,
     WorktreeOwnership,
@@ -1657,6 +1658,7 @@ class Reconciler:
             )
 
         try:
+            AuthorizationStore(store).recover_pending_transition()
             initial_state = store.load()
             if initial_state.run_id != run_id:
                 raise ReconciliationRecoveryError("run state belongs to another run")
