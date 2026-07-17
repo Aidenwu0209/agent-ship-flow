@@ -1658,6 +1658,13 @@ class Reconciler:
             )
 
         try:
+            initial_state = store.load()
+            if initial_state.run_id != run_id:
+                raise ReconciliationRecoveryError("run state belongs to another run")
+            if not _run_directory_is_current(run_descriptor, run_directory):
+                raise ReconciliationRecoveryError(
+                    "run state directory changed while loading"
+                )
             AuthorizationStore(store).recover_pending_transition()
             initial_state = store.load()
             if initial_state.run_id != run_id:

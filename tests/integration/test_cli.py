@@ -1796,6 +1796,80 @@ class BeginnerCliFlowTests(unittest.TestCase):
             events_after_recovery,
         )
 
+    def test_status_validates_requested_run_identity_before_scope_recovery(
+        self,
+    ) -> None:
+        _, revision = self.start_developing()
+        repository = GitRepository.discover(self.primary)
+        run_directory = (
+            repository.git_common_directory / "ship-flow" / "runs" / self.run_id
+        )
+        store = StateStore(run_directory)
+        authorizations = AuthorizationStore(store)
+        contract = authorizations.current()
+        assert contract is not None
+
+        def stop_after_pending_publication(
+            next_phase: Phase | str,
+            *,
+            expected_revision: int,
+        ) -> object:
+            self.assertEqual(next_phase, Phase.AWAITING_SCOPE_APPROVAL)
+            self.assertEqual(expected_revision, revision)
+            self.assertTrue(authorizations.pending_path.is_file())
+            raise OSError("simulated process stop before scope phase transition")
+
+        with mock.patch.object(
+            store,
+            "transition",
+            side_effect=stop_after_pending_publication,
+        ):
+            with self.assertRaisesRegex(OSError, "simulated process stop"):
+                authorizations.request_change(
+                    reason="feature_expansion",
+                    summary="add deployment dashboard",
+                    proposed_goal="ship the feature and deployment dashboard",
+                    proposed_manifest_sha256=contract.manifest_sha256,
+                    proposed_release_target=contract.release_target,
+                    proposed_previous_release=contract.previous_release,
+                    expected_revision=revision,
+                )
+
+        requested_run_id = "run-cli-misbound"
+        requested_directory = run_directory.with_name(requested_run_id)
+        run_directory.rename(requested_directory)
+
+        def durable_evidence() -> dict[Path, bytes]:
+            paths = [
+                requested_directory / "state.json",
+                requested_directory / "events.jsonl",
+                *sorted(
+                    path
+                    for path in (requested_directory / "authorization").rglob("*")
+                    if path.is_file()
+                ),
+            ]
+            return {
+                path.relative_to(requested_directory): path.read_bytes()
+                for path in paths
+            }
+
+        before = durable_evidence()
+
+        completed = self.cli(
+            "status",
+            "--repo",
+            str(self.primary),
+            "--run-id",
+            requested_run_id,
+        )
+
+        self.assertEqual(completed.returncode, 6)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "evidence_invalid")
+        self.assertEqual(durable_evidence(), before)
+
     def test_manifest_drift_status_is_read_only_and_requests_scope_change(
         self,
     ) -> None:

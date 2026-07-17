@@ -40,6 +40,8 @@ from .reconcile import (
     ReconciliationRecoveryError,
     Reconciler,
     _load_safe_manifest,
+    _open_run_directory,
+    _run_directory_is_current,
     next_action,
     record_plan_approval,
 )
@@ -62,6 +64,7 @@ from .review import (
 )
 from .store import (
     InvalidTransitionError,
+    PrivateRootAnchor,
     StateCorruptionError,
     StateNotFoundError,
     StateStore,
@@ -738,7 +741,31 @@ def _handle_status(args: argparse.Namespace) -> dict[str, object]:
         else None
     )
     if store is not None:
-        AuthorizationStore(store).recover_pending_transition()
+        run_directory = store.run_directory
+        run_descriptor = _open_run_directory(repository, args.run_id)
+        try:
+            with store.anchored(PrivateRootAnchor(run_directory, run_descriptor)):
+                state = store.load()
+                if state.run_id != args.run_id:
+                    raise ReconciliationRecoveryError(
+                        "run state belongs to another run"
+                    )
+                if not _run_directory_is_current(run_descriptor, run_directory):
+                    raise ReconciliationRecoveryError(
+                        "run state directory changed while loading"
+                    )
+                AuthorizationStore(store).recover_pending_transition()
+                state = store.load()
+                if state.run_id != args.run_id:
+                    raise ReconciliationRecoveryError(
+                        "run state belongs to another run"
+                    )
+                if not _run_directory_is_current(run_descriptor, run_directory):
+                    raise ReconciliationRecoveryError(
+                        "run state directory changed while loading"
+                    )
+        finally:
+            os.close(run_descriptor)
     contract = _current_authorization(store) if store is not None else None
     if contract is not None and store is not None:
         state = store.load()

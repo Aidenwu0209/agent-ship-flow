@@ -1206,6 +1206,109 @@ class PlanApprovalTests(unittest.TestCase):
 
 
 class PreGateReconciliationTests(unittest.TestCase):
+    def test_reconcile_validates_requested_run_identity_before_scope_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            primary = root / "repo"
+            initialize_repository(primary)
+            manifest = Manifest(
+                project_name="fixture",
+                base_branch="main",
+                remote="origin",
+                verification_steps=(
+                    CommandSpec(
+                        "unit",
+                        (sys.executable, "-c", "pass"),
+                        "unit",
+                    ),
+                ),
+                release_required=False,
+            )
+            write_manifest(primary / ".ship" / "manifest.toml", manifest)
+            git(primary, "add", ".ship/manifest.toml")
+            git(primary, "commit", "-m", "add manifest")
+            repository = GitRepository.discover(primary)
+            stored_run_id = "run-scope-stored"
+            requested_run_id = "run-scope-requested"
+            ownership = create_run_worktree(
+                repository,
+                run_id=stored_run_id,
+                branch="ship/scope-stored",
+                worktree_path=root / "worktree",
+            )
+            store = StateStore(ownership.record_path.parent)
+            state = store.create(stored_run_id)
+            state = store.transition(Phase.PLANNING, expected_revision=state.revision)
+            authorizations = AuthorizationStore(store)
+            contract = authorizations.create_initial(
+                mode=ExecutionMode.AUTONOMOUS,
+                goal="ship the requested change",
+                repository=ownership.primary_checkout,
+                worktree=ownership.worktree_path,
+                branch=ownership.branch,
+                manifest_sha256=manifest_digest(manifest),
+                release_target=None,
+                previous_release=None,
+                state_revision=state.revision,
+            )
+
+            def stop_after_pending_publication(
+                next_phase: Phase | str,
+                *,
+                expected_revision: int,
+            ) -> object:
+                self.assertEqual(next_phase, Phase.AWAITING_SCOPE_APPROVAL)
+                self.assertEqual(expected_revision, state.revision)
+                self.assertTrue(authorizations.pending_path.is_file())
+                raise OSError("simulated process stop after pending publication")
+
+            with mock.patch.object(
+                store,
+                "transition",
+                side_effect=stop_after_pending_publication,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated process stop"):
+                    authorizations.request_change(
+                        reason="manifest_drift",
+                        summary="verification command changed",
+                        proposed_goal=contract.goal,
+                        proposed_manifest_sha256="b" * 64,
+                        proposed_release_target=contract.release_target,
+                        proposed_previous_release=contract.previous_release,
+                        expected_revision=state.revision,
+                    )
+
+            stored_directory = ownership.record_path.parent
+            requested_directory = stored_directory.with_name(requested_run_id)
+            stored_directory.rename(requested_directory)
+
+            def durable_evidence() -> dict[Path, bytes]:
+                paths = [
+                    requested_directory / "state.json",
+                    requested_directory / "events.jsonl",
+                    *sorted(
+                        path
+                        for path in (requested_directory / "authorization").rglob("*")
+                        if path.is_file()
+                    ),
+                ]
+                return {
+                    path.relative_to(requested_directory): path.read_bytes()
+                    for path in paths
+                }
+
+            before = durable_evidence()
+
+            with self.assertRaisesRegex(
+                ReconciliationRecoveryError,
+                "run state belongs to another run",
+            ):
+                Reconciler(repository).reconcile(requested_run_id)
+
+            self.assertEqual(durable_evidence(), before)
+
     def test_reconcile_recovers_pending_scope_publication_before_routing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
