@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from .model import LEGAL_TRANSITIONS, Phase, RunState
 from .store import (
     FileLock,
     InvalidTransitionError,
+    PrivateRootAnchor,
     StateCorruptionError,
     StateNotFoundError,
     StateStore,
@@ -380,6 +383,32 @@ class AuthorizationStore:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
+        trusted_root = self.store.trusted_root
+        if isinstance(trusted_root, PrivateRootAnchor):
+            lock = FileLock.at(
+                trusted_root.descriptor,
+                self.lock_path.name,
+                display_path=self.lock_path,
+            )
+            with lock:
+                try:
+                    anchored = os.fstat(trusted_root.descriptor)
+                    current = os.stat(trusted_root.path, follow_symlinks=False)
+                except OSError as error:
+                    raise StateCorruptionError(
+                        "run directory changed while acquiring authorization lock"
+                    ) from error
+                if (
+                    not stat.S_ISDIR(anchored.st_mode)
+                    or not stat.S_ISDIR(current.st_mode)
+                    or (anchored.st_dev, anchored.st_ino)
+                    != (current.st_dev, current.st_ino)
+                ):
+                    raise StateCorruptionError(
+                        "run directory changed while acquiring authorization lock"
+                    )
+                yield
+            return
         lock = FileLock.authorization(self.store.run_directory)
         with lock as acquired_lock, self.store.anchored(acquired_lock.trusted_parent):
             yield

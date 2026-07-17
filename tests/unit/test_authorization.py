@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import stat
 import tempfile
@@ -20,7 +21,9 @@ from ship_flow.authorization import (
 )
 from ship_flow.model import Phase
 from ship_flow.store import (
+    FileLock,
     InvalidTransitionError,
+    PrivateRootAnchor,
     StateCorruptionError,
     StateStore,
     StaleRevisionError,
@@ -623,6 +626,66 @@ class AuthorizationStoreTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertEqual(self.store.load(), state)
         self.assertEqual(self.authorizations.pending(), request)
+
+    def test_anchored_recovery_rejects_run_path_swap_without_mutation(self) -> None:
+        self._create_initial()
+        with mock.patch.object(
+            self.store,
+            "transition",
+            side_effect=OSError("simulated process stop after pending publication"),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated process stop"):
+                self._request_change()
+
+        replacement = self.run_directory.with_name("run-replacement")
+        displaced = self.run_directory.with_name("run-original-displaced")
+        shutil.copytree(self.run_directory, replacement)
+
+        def durable_evidence(root: Path) -> dict[Path, bytes]:
+            paths = [
+                root / "state.json",
+                root / "events.jsonl",
+                root / "authorization.lock",
+                *sorted(
+                    path
+                    for path in (root / "authorization").rglob("*")
+                    if path.is_file()
+                ),
+            ]
+            return {path.relative_to(root): path.read_bytes() for path in paths}
+
+        original_before = durable_evidence(self.run_directory)
+        replacement_before = durable_evidence(replacement)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(
+                os,
+                "O_NOFOLLOW",
+                0,
+            )
+        )
+        descriptor = os.open(self.run_directory, flags)
+        try:
+            with self.store.anchored(PrivateRootAnchor(self.run_directory, descriptor)):
+                self.assertEqual(self.store.load().run_id, "run-123")
+                self.run_directory.rename(displaced)
+                replacement.rename(self.run_directory)
+
+                with self.assertRaisesRegex(
+                    StateCorruptionError,
+                    "run directory changed",
+                ):
+                    self.authorizations.recover_pending_transition()
+        finally:
+            os.close(descriptor)
+
+        self.assertEqual(durable_evidence(self.run_directory), replacement_before)
+        self.assertEqual(durable_evidence(displaced), original_before)
+        with FileLock.authorization(self.run_directory):
+            pass
+        with FileLock.authorization(displaced):
+            pass
 
     def test_restart_does_not_clear_orphan_with_missing_contract(self) -> None:
         orphan = self._leave_orphan_pending_after_interrupted_stale_cas()
